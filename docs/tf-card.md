@@ -81,20 +81,26 @@ table style, and the first few partition entries:
 - MBR
 - raw FAT/superfloppy with no partition table
 
-It can format the mounted TF card. Use `FS` to choose:
+It can quick-format the currently mounted volume. Use `FS` to choose:
 
 - `Auto`: FatFs chooses a suitable FAT/exFAT variant
 - `FAT32`: maximum compatibility
 - `exFAT`: larger media cards and large files
 
-Formatting requires tapping `FMT` and then `OK?`. It erases the TF card and
-recreates the `/szpi` product directories.
+Formatting requires tapping `FMT` and then `OK?`. It erases the mounted data
+volume and recreates the `/szpi` product directories.
 
 `DIR` recreates the `/szpi` product directories without formatting.
 
 Multi-partition cards are currently detected and displayed, but the device UI
 does not yet switch between multiple mounted volumes. The firmware still mounts
 one FatFs volume at `/sdcard`.
+
+The device formatter preserves the current partition table and formats the
+mounted partition. Whole-card repartitioning is a future advanced feature.
+If the filesystem is already damaged and cannot be mounted, the formatter falls
+back to a recovery format so the card can become mountable again. That recovery
+path is slower than the normal mounted-volume quick format.
 
 USB-ZIP, USB-FDD, and HDD modes are legacy PC BIOS boot-disk layout concepts.
 They are not SDMMC electrical modes and are not required for this handheld to

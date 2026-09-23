@@ -1696,7 +1696,8 @@ static void sd_format_task(void *arg)
     }
     lvgl_port_unlock();
 
-    esp_err_t ret = bsp_sdcard_format(format);
+    int fatfs_result = 0;
+    esp_err_t ret = bsp_sdcard_format_with_result(format, &fatfs_result);
     bsp_sdcard_info_t info;
     char info_text[768];
     esp_err_t info_ret = bsp_sdcard_get_info(&info);
@@ -1705,7 +1706,11 @@ static void sd_format_task(void *arg)
 
     lvgl_port_lock(0);
     if (s_sdmgr_status_label != NULL) {
-        lv_label_set_text(s_sdmgr_status_label, ret == ESP_OK ? "格式化完成" : "格式化失败");
+        if (ret == ESP_OK) {
+            lv_label_set_text(s_sdmgr_status_label, "格式化完成");
+        } else {
+            lv_label_set_text_fmt(s_sdmgr_status_label, "格式化失败:%d", fatfs_result);
+        }
     }
     if (s_sdmgr_info_label != NULL) {
         lv_label_set_text(s_sdmgr_info_label, info_text);
@@ -1757,7 +1762,7 @@ static void sd_format_confirm_cb(lv_event_t *e)
 
     s_sd_format_confirm = false;
     sd_update_format_labels();
-    if (xTaskCreatePinnedToCore(sd_format_task, "sd_format", 5 * 1024,
+    if (xTaskCreatePinnedToCore(sd_format_task, "sd_format", 6 * 1024,
                                 (void *)(uintptr_t)s_sd_format_target,
                                 4, &s_sd_format_task_handle, 1) != pdPASS) {
         s_sd_format_task_handle = NULL;

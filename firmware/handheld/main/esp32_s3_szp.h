@@ -299,6 +299,7 @@ typedef struct {
 esp_err_t bsp_sdcard_mount(void); // 挂载SD卡
 esp_err_t bsp_sdcard_unmount(void); // 卸载SD卡
 esp_err_t bsp_sdcard_format(bsp_sdcard_format_t format);
+esp_err_t bsp_sdcard_format_with_result(bsp_sdcard_format_t format, int *fatfs_result);
 esp_err_t bsp_sdcard_prepare_product_dirs(void);
 esp_err_t bsp_sdcard_get_info(bsp_sdcard_info_t *info);
 /**********************    SD卡 ↑  *********************/

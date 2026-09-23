@@ -964,8 +964,20 @@ esp_err_t bsp_sdcard_get_info(bsp_sdcard_info_t *info)
     return ESP_OK;
 }
 
-// 挂载SD卡
-esp_err_t bsp_sdcard_mount(void)
+static uint8_t bsp_sdcard_find_partition_for_lba(const bsp_sdcard_info_t *info, uint64_t volbase)
+{
+    if (volbase == 0) {
+        return 0;
+    }
+    for (uint8_t i = 0; i < info->partition_count; i++) {
+        if (info->partitions[i].valid && info->partitions[i].first_lba == volbase) {
+            return info->partitions[i].index;
+        }
+    }
+    return 0xff;
+}
+
+static esp_err_t bsp_sdcard_mount_internal(bool format_if_mount_failed)
 {
     if (sdmmc_card != NULL) {
         ESP_LOGI(TAG, "SD card already mounted");
@@ -974,7 +986,7 @@ esp_err_t bsp_sdcard_mount(void)
 
     ESP_LOGI(TAG, "Mounting SD card");
     esp_vfs_fat_sdmmc_mount_config_t mount_config = {
-        .format_if_mount_failed = false,  // 加载不成功是否需要格式化
+        .format_if_mount_failed = format_if_mount_failed,
         .max_files = 5,                   // 最大文件数
         .allocation_unit_size = 8 * 1024
     };
@@ -994,9 +1006,33 @@ esp_err_t bsp_sdcard_mount(void)
     return ret;
 }
 
-esp_err_t bsp_sdcard_format(bsp_sdcard_format_t format)
+// 挂载SD卡
+esp_err_t bsp_sdcard_mount(void)
 {
-    ESP_RETURN_ON_ERROR(bsp_sdcard_mount(), TAG, "mount sdcard before format failed");
+    return bsp_sdcard_mount_internal(false);
+}
+
+esp_err_t bsp_sdcard_format_with_result(bsp_sdcard_format_t format, int *fatfs_result)
+{
+    if (fatfs_result != NULL) {
+        *fatfs_result = FR_OK;
+    }
+    esp_err_t mount_ret = bsp_sdcard_mount();
+    if (mount_ret != ESP_OK) {
+        if (fatfs_result != NULL) {
+            *fatfs_result = -1;
+        }
+        ESP_LOGW(TAG, "mount before format failed (%s), trying recovery format",
+                 esp_err_to_name(mount_ret));
+        ESP_RETURN_ON_ERROR(bsp_sdcard_mount_internal(true), TAG, "recovery format mount failed");
+        if (format == BSP_SDCARD_FORMAT_AUTO) {
+            ESP_RETURN_ON_ERROR(bsp_sdcard_prepare_product_dirs(), TAG, "prepare sdcard dirs failed");
+            if (fatfs_result != NULL) {
+                *fatfs_result = FR_OK;
+            }
+            return ESP_OK;
+        }
+    }
     if (sdmmc_card == NULL) {
         return ESP_ERR_INVALID_STATE;
     }
@@ -1007,9 +1043,26 @@ esp_err_t bsp_sdcard_format(bsp_sdcard_format_t format)
         return ESP_ERR_INVALID_STATE;
     }
 
+    bsp_sdcard_info_t info;
+    ESP_RETURN_ON_ERROR(bsp_sdcard_get_info(&info), TAG, "get sdcard info before format failed");
+    uint8_t volume_index = ctx->pdrv;
+    if (volume_index >= FF_VOLUMES) {
+        ESP_LOGE(TAG, "invalid FatFs volume index %u", (unsigned)volume_index);
+        return ESP_ERR_INVALID_STATE;
+    }
+    uint8_t partition_index = bsp_sdcard_find_partition_for_lba(&info, ctx->fs->volbase);
+    if (partition_index == 0xff) {
+        ESP_LOGE(TAG, "can not match mounted volume base LBA %llu to partition table",
+                 (unsigned long long)ctx->fs->volbase);
+        return ESP_ERR_NOT_FOUND;
+    }
+
     char drv[3] = {(char)('0' + ctx->pdrv), ':', 0};
     FRESULT res = f_mount(0, drv, 0);
     if (res != FR_OK) {
+        if (fatfs_result != NULL) {
+            *fatfs_result = res;
+        }
         ESP_LOGE(TAG, "f_mount unmount failed (%d)", res);
         return ESP_FAIL;
     }
@@ -1021,33 +1074,60 @@ esp_err_t bsp_sdcard_format(bsp_sdcard_format_t format)
         return ESP_ERR_NO_MEM;
     }
 
+#if FF_MULTI_PARTITION
+    PARTITION saved_mapping = VolToPart[volume_index];
+    VolToPart[volume_index].pd = ctx->pdrv;
+    VolToPart[volume_index].pt = partition_index;
+#endif
+
     size_t alloc_unit_size = esp_vfs_fat_get_allocation_unit_size(
         sdmmc_card->csd.sector_size,
         ctx->mount_config.allocation_unit_size ? ctx->mount_config.allocation_unit_size : 8 * 1024);
+    BYTE format_flags = bsp_sdcard_format_flag(format);
+    if (partition_index == 0) {
+        format_flags |= FM_SFD;
+    }
     MKFS_PARM opt = {
-        .fmt = bsp_sdcard_format_flag(format),
+        .fmt = format_flags,
         .n_fat = ctx->mount_config.use_one_fat ? 1 : 2,
         .align = 0,
         .n_root = ctx->mount_config.rootdir_entries,
         .au_size = alloc_unit_size,
     };
 
-    ESP_LOGW(TAG, "Formatting SD card: fmt=0x%x au=%u", opt.fmt, (unsigned)alloc_unit_size);
+    ESP_LOGW(TAG, "Formatting SD card volume: fmt=0x%x au=%u partition=%u volbase=%llu",
+             opt.fmt, (unsigned)alloc_unit_size, (unsigned)partition_index,
+             (unsigned long long)ctx->fs->volbase);
     res = f_mkfs(drv, &opt, workbuf, workbuf_size);
     ff_memfree(workbuf);
 
+#if FF_MULTI_PARTITION
+    VolToPart[volume_index] = saved_mapping;
+#endif
+
     FRESULT remount_res = f_mount(ctx->fs, drv, 1);
     if (res != FR_OK) {
+        if (fatfs_result != NULL) {
+            *fatfs_result = res;
+        }
         ESP_LOGE(TAG, "f_mkfs failed (%d)", res);
         return ESP_FAIL;
     }
     if (remount_res != FR_OK) {
+        if (fatfs_result != NULL) {
+            *fatfs_result = remount_res;
+        }
         ESP_LOGE(TAG, "f_mount remount failed (%d)", remount_res);
         return ESP_FAIL;
     }
 
     ESP_RETURN_ON_ERROR(bsp_sdcard_prepare_product_dirs(), TAG, "prepare sdcard dirs failed");
     return ESP_OK;
+}
+
+esp_err_t bsp_sdcard_format(bsp_sdcard_format_t format)
+{
+    return bsp_sdcard_format_with_result(format, NULL);
 }
 
 esp_err_t bsp_sdcard_unmount(void)

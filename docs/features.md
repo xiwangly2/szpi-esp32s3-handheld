@@ -42,12 +42,16 @@ operations live in the separate TF manager page.
 
 The TF manager page shows capacity, mounted filesystem, partition table type
 (`GPT`, `MBR`, or raw FAT), and the first few partition entries. It also has a
-guarded formatter:
+guarded quick formatter for the currently mounted volume:
 
 - `FS` cycles `Auto`, `FAT32`, and `exFAT`
 - `DIR` recreates the `/sdcard/szpi` product directories
 - `FMT` requires a second confirmation tap before formatting
 - after formatting, product directories under `/sdcard/szpi` are recreated
+
+Formatting preserves the current partition-table layout and formats the mounted
+data partition. Whole-card repartitioning is intentionally left out of the
+touch UI until it can be made harder to trigger by accident.
 
 The advanced USB-ZIP/USB-FDD/HDD boot modes are PC BIOS boot-disk layout
 concepts. The firmware currently reports that distinction in the TF manager
