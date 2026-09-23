@@ -1,5 +1,7 @@
 #pragma once
 
+#include <stdbool.h>
+#include <stdint.h>
 #include <string.h>
 #include "math.h"
 #include "esp_err.h"
@@ -257,9 +259,48 @@ void app_camera_lcd(void);
 #define SD_DAT0_IO     (21)
 
 #define SD_MOUNT_POINT     "/sdcard"
+#define BSP_SDCARD_MAX_PARTITIONS 4
+
+typedef enum {
+    BSP_SDCARD_FORMAT_AUTO = 0,
+    BSP_SDCARD_FORMAT_FAT32,
+    BSP_SDCARD_FORMAT_EXFAT,
+} bsp_sdcard_format_t;
+
+typedef enum {
+    BSP_SDCARD_TABLE_UNKNOWN = 0,
+    BSP_SDCARD_TABLE_NONE,
+    BSP_SDCARD_TABLE_MBR,
+    BSP_SDCARD_TABLE_GPT,
+} bsp_sdcard_table_t;
+
+typedef struct {
+    bool valid;
+    bool bootable;
+    uint8_t index;
+    uint8_t mbr_type;
+    uint64_t first_lba;
+    uint64_t last_lba;
+    uint64_t sectors;
+    char name[32];
+} bsp_sdcard_partition_info_t;
+
+typedef struct {
+    bool mounted;
+    uint32_t sector_size;
+    uint64_t card_sectors;
+    uint64_t card_bytes;
+    char filesystem[12];
+    bsp_sdcard_table_t table_type;
+    uint8_t partition_count;
+    bsp_sdcard_partition_info_t partitions[BSP_SDCARD_MAX_PARTITIONS];
+} bsp_sdcard_info_t;
 
 esp_err_t bsp_sdcard_mount(void); // 挂载SD卡
 esp_err_t bsp_sdcard_unmount(void); // 卸载SD卡
+esp_err_t bsp_sdcard_format(bsp_sdcard_format_t format);
+esp_err_t bsp_sdcard_prepare_product_dirs(void);
+esp_err_t bsp_sdcard_get_info(bsp_sdcard_info_t *info);
 /**********************    SD卡 ↑  *********************/
 /**********************************************************/
 

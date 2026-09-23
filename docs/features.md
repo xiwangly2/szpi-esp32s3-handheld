@@ -2,7 +2,7 @@
 
 ## Launcher
 
-The home screen is a two-page LVGL launcher. Touch swipes change pages. GPIO0,
+The home screen is a paged LVGL launcher. Touch swipes change pages. GPIO0,
 the board user key, changes page on the home screen and refreshes the random
 image when the random image app is active.
 
@@ -37,6 +37,22 @@ Files above those limits show a size message instead of being decoded
 automatically. This keeps large media from blocking the UI thread or causing
 repeated refresh glitches on a small embedded display.
 
+The TF card file manager is kept focused on browsing and media previews. Disk
+operations live in the separate TF manager page.
+
+The TF manager page shows capacity, mounted filesystem, partition table type
+(`GPT`, `MBR`, or raw FAT), and the first few partition entries. It also has a
+guarded formatter:
+
+- `FS` cycles `Auto`, `FAT32`, and `exFAT`
+- `DIR` recreates the `/sdcard/szpi` product directories
+- `FMT` requires a second confirmation tap before formatting
+- after formatting, product directories under `/sdcard/szpi` are recreated
+
+The advanced USB-ZIP/USB-FDD/HDD boot modes are PC BIOS boot-disk layout
+concepts. The firmware currently reports that distinction in the TF manager
+instead of offering destructive boot-disk partition editing from the device UI.
+
 Music scanning checks:
 
 - `/sdcard/szpi/music`
@@ -62,10 +78,18 @@ LVGL page instead of aborting the whole firmware. Photos are saved to:
 
 The WLAN UI reuses the shared WiFi driver instead of repeatedly tearing it down.
 Open networks connect without a password prompt. Successful network credentials
-are persisted to TF card history and synced to the random image app config.
+are persisted to device NVS and, when a TF card is present, to TF card history.
+The currently connected network is also synced to the random image app config.
 
 ## Bluetooth
 
 The current page is a BLE HID demo. It has been made reentrant so repeatedly
 opening the page is less likely to crash. A2DP speaker, Bluetooth microphone,
 and richer pairing UX are future work.
+
+## Roadmap
+
+Exploratory directions are intentionally tracked as future work until they are
+stable on real hardware: A2DP speaker, Bluetooth microphone, USB plug-and-play
+camera, short video playback, camera recording, a fuller media library,
+thumbnail generation, and background indexing.

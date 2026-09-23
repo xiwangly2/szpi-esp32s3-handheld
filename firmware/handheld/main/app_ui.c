@@ -11,6 +11,7 @@
 #include "esp_event.h"
 #include "esp_heap_caps.h"
 #include "esp_timer.h"
+#include "nvs.h"
 #include "img_converters.h"
 #include "jpeg_decoder.h"
 #include "extra/libs/gif/lv_gif.h"
@@ -303,6 +304,27 @@ lv_obj_t *btn_music_back;
 
 #define MUSIC_DIR_PRIMARY SD_MOUNT_POINT "/szpi/music"
 #define MUSIC_DIR_ALT     SD_MOUNT_POINT "/music"
+
+static void music_dropdown_apply_font(lv_obj_t *dropdown)
+{
+    lv_obj_set_style_text_font(dropdown, &font_alipuhui20, LV_PART_MAIN);
+    lv_obj_t *list = lv_dropdown_get_list(dropdown);
+    if (list != NULL) {
+        lv_obj_set_style_text_font(list, &font_alipuhui20, LV_PART_MAIN);
+        lv_obj_set_style_text_font(list, &font_alipuhui20, LV_PART_SELECTED);
+    }
+}
+
+static void music_dropdown_style_cb(lv_event_t *event)
+{
+    lv_event_code_t code = lv_event_get_code(event);
+    if (code == LV_EVENT_PRESSED ||
+        code == LV_EVENT_CLICKED ||
+        code == LV_EVENT_READY ||
+        code == LV_EVENT_VALUE_CHANGED) {
+        music_dropdown_apply_font(lv_event_get_target(event));
+    }
+}
 
 static bool music_name_is_audio(const char *name)
 {
@@ -783,9 +805,10 @@ void music_ui(void)
     music_list = lv_dropdown_create(icon_in_obj);
     lv_dropdown_clear_options(music_list);
     lv_dropdown_set_options_static(music_list, "Scanning...");
-    lv_obj_set_style_text_font(music_list, &font_alipuhui20, LV_STATE_ANY);
+    music_dropdown_apply_font(music_list);
     lv_obj_set_width(music_list, 200);
     lv_obj_align(music_list, LV_ALIGN_TOP_MID, 0, 60);
+    lv_obj_add_event_cb(music_list, music_dropdown_style_cb, LV_EVENT_ALL, NULL);
     lv_obj_add_event_cb(music_list, music_list_cb, LV_EVENT_VALUE_CHANGED, NULL);
 
     build_file_list(music_list);
@@ -864,6 +887,8 @@ lv_obj_t * sdcard_title; // SD卡页面标题背景
 lv_obj_t * sdcard_label; // SD卡页面标题
 lv_obj_t * sdcard_file_list; // SD卡文件列表
 lv_obj_t * sdcard_preview_page; // 文件预览页面
+static lv_obj_t *s_sdmgr_status_label;
+static lv_obj_t *s_sdmgr_info_label;
 
 #define SDCARD_PREVIEW_TOP 40
 #define SDCARD_PREVIEW_W BSP_LCD_H_RES
@@ -898,6 +923,12 @@ static uint8_t *s_preview_img_buf;
 static lv_img_dsc_t s_preview_img_dsc;
 static bool s_lv_fs_ready;
 static volatile uint32_t s_sd_preview_generation;
+static bsp_sdcard_format_t s_sd_format_target = BSP_SDCARD_FORMAT_AUTO;
+static bool s_sd_format_confirm;
+static TaskHandle_t s_sd_format_task_handle;
+static TaskHandle_t s_sd_manager_task_handle;
+static lv_obj_t *s_sd_fs_button_label;
+static lv_obj_t *s_sd_fmt_button_label;
 
 typedef struct {
     char path[512];
@@ -908,6 +939,29 @@ typedef struct {
 esp_err_t list_sdcard_files(char * path);
 static void file_list_btn_cb(lv_event_t * e); 
 static void sd_preview_message(const char *title, const char *message);
+
+static const char *sd_format_name(bsp_sdcard_format_t format)
+{
+    switch (format) {
+    case BSP_SDCARD_FORMAT_FAT32:
+        return "FAT32";
+    case BSP_SDCARD_FORMAT_EXFAT:
+        return "exFAT";
+    case BSP_SDCARD_FORMAT_AUTO:
+    default:
+        return "Auto";
+    }
+}
+
+static void sd_update_format_labels(void)
+{
+    if (s_sd_fs_button_label != NULL) {
+        lv_label_set_text_fmt(s_sd_fs_button_label, "FS:%s", sd_format_name(s_sd_format_target));
+    }
+    if (s_sd_fmt_button_label != NULL) {
+        lv_label_set_text(s_sd_fmt_button_label, s_sd_format_confirm ? "OK?" : "FMT");
+    }
+}
 
 static const char *sd_file_ext(const char *path)
 {
@@ -960,6 +1014,34 @@ static void sd_format_file_size(char *out, size_t out_len, off_t size)
         return;
     }
     snprintf(out, out_len, "%.1f MB", (double)size / (1024.0 * 1024.0));
+}
+
+static void sd_format_bytes_u64(char *out, size_t out_len, uint64_t bytes)
+{
+    if (bytes < 1024ULL) {
+        snprintf(out, out_len, "%llu B", (unsigned long long)bytes);
+    } else if (bytes < 1024ULL * 1024ULL) {
+        snprintf(out, out_len, "%.1f KB", (double)bytes / 1024.0);
+    } else if (bytes < 1024ULL * 1024ULL * 1024ULL) {
+        snprintf(out, out_len, "%.1f MB", (double)bytes / (1024.0 * 1024.0));
+    } else {
+        snprintf(out, out_len, "%.1f GB", (double)bytes / (1024.0 * 1024.0 * 1024.0));
+    }
+}
+
+static const char *sd_partition_table_name(bsp_sdcard_table_t table_type)
+{
+    switch (table_type) {
+    case BSP_SDCARD_TABLE_NONE:
+        return "No PT";
+    case BSP_SDCARD_TABLE_MBR:
+        return "MBR";
+    case BSP_SDCARD_TABLE_GPT:
+        return "GPT";
+    case BSP_SDCARD_TABLE_UNKNOWN:
+    default:
+        return "Unknown";
+    }
 }
 
 static void sd_preview_large_file(const char *title, off_t file_size, size_t limit)
@@ -1472,9 +1554,229 @@ static void sd_preview_file(const char *path, sd_file_type_t type, off_t file_si
     }
 }
 
+static void sdmgr_build_info_text(char *out, size_t out_len, const bsp_sdcard_info_t *info, esp_err_t ret)
+{
+    if (ret != ESP_OK) {
+        snprintf(out, out_len, "TF卡不可用\n错误: %s", esp_err_to_name(ret));
+        return;
+    }
+
+    char card_size[24];
+    sd_format_bytes_u64(card_size, sizeof(card_size), info->card_bytes);
+    int used = snprintf(out, out_len,
+                        "容量: %s  扇区:%luB\n挂载: %s  分区表:%s  分区:%u\n",
+                        card_size,
+                        (unsigned long)info->sector_size,
+                        info->filesystem,
+                        sd_partition_table_name(info->table_type),
+                        (unsigned)info->partition_count);
+
+    if (used < 0 || used >= (int)out_len) {
+        return;
+    }
+
+    for (uint8_t i = 0; i < info->partition_count && used < (int)out_len - 1; i++) {
+        const bsp_sdcard_partition_info_t *part = &info->partitions[i];
+        if (!part->valid) {
+            continue;
+        }
+        char part_size[24];
+        sd_format_bytes_u64(part_size, sizeof(part_size), part->sectors * (uint64_t)info->sector_size);
+        used += snprintf(out + used, out_len - used,
+                         "#%u %s %s\nLBA %llu-%llu\n",
+                         (unsigned)part->index,
+                         part_size,
+                         part->name,
+                         (unsigned long long)part->first_lba,
+                         (unsigned long long)part->last_lba);
+    }
+
+    if (info->partition_count == 0 && used < (int)out_len - 1) {
+        used += snprintf(out + used, out_len - used, "未发现分区条目，可能是裸FAT卷。\n");
+    }
+
+    if (used < (int)out_len - 1) {
+        snprintf(out + used, out_len - used,
+                 "\n高级: USB-ZIP/FDD/HDD 属于PC BIOS启动盘布局；本机当前作为TF数据卡使用。多分区可识别，挂载切换待实现。");
+    }
+}
+
+static void sdmgr_refresh_task(void *arg)
+{
+    (void)arg;
+    bsp_sdcard_info_t info;
+    char info_text[768];
+    esp_err_t ret = bsp_sdcard_get_info(&info);
+    sdmgr_build_info_text(info_text, sizeof(info_text), &info, ret);
+
+    lvgl_port_lock(0);
+    if (s_sdmgr_status_label != NULL) {
+        lv_label_set_text(s_sdmgr_status_label, ret == ESP_OK ? "Ready" : "读取失败");
+    }
+    if (s_sdmgr_info_label != NULL) {
+        lv_label_set_text(s_sdmgr_info_label, info_text);
+    }
+    lvgl_port_unlock();
+
+    s_sd_manager_task_handle = NULL;
+    vTaskDelete(NULL);
+}
+
+static void sdmgr_start_refresh(void)
+{
+    if (s_sd_manager_task_handle != NULL || s_sd_format_task_handle != NULL) {
+        return;
+    }
+    if (s_sdmgr_status_label != NULL) {
+        lv_label_set_text(s_sdmgr_status_label, "扫描中...");
+    }
+    if (xTaskCreatePinnedToCore(sdmgr_refresh_task, "sdmgr_refresh", 5 * 1024,
+                                NULL, 4, &s_sd_manager_task_handle, 1) != pdPASS) {
+        s_sd_manager_task_handle = NULL;
+        if (s_sdmgr_status_label != NULL) {
+            lv_label_set_text(s_sdmgr_status_label, "任务创建失败");
+        }
+    }
+}
+
+static void sdmgr_prepare_task(void *arg)
+{
+    (void)arg;
+    esp_err_t ret = bsp_sdcard_prepare_product_dirs();
+    bsp_sdcard_info_t info;
+    char info_text[768];
+    esp_err_t info_ret = bsp_sdcard_get_info(&info);
+    sdmgr_build_info_text(info_text, sizeof(info_text), &info, info_ret);
+
+    lvgl_port_lock(0);
+    if (s_sdmgr_status_label != NULL) {
+        lv_label_set_text(s_sdmgr_status_label, ret == ESP_OK ? "目录已初始化" : "目录初始化失败");
+    }
+    if (s_sdmgr_info_label != NULL) {
+        lv_label_set_text(s_sdmgr_info_label, info_text);
+    }
+    lvgl_port_unlock();
+
+    s_sd_manager_task_handle = NULL;
+    vTaskDelete(NULL);
+}
+
+static void sdmgr_prepare_cb(lv_event_t *e)
+{
+    if (lv_event_get_code(e) != LV_EVENT_CLICKED ||
+        s_sd_manager_task_handle != NULL || s_sd_format_task_handle != NULL) {
+        return;
+    }
+    if (s_sdmgr_status_label != NULL) {
+        lv_label_set_text(s_sdmgr_status_label, "初始化目录...");
+    }
+    if (xTaskCreatePinnedToCore(sdmgr_prepare_task, "sdmgr_dirs", 5 * 1024,
+                                NULL, 4, &s_sd_manager_task_handle, 1) != pdPASS) {
+        s_sd_manager_task_handle = NULL;
+        if (s_sdmgr_status_label != NULL) {
+            lv_label_set_text(s_sdmgr_status_label, "任务创建失败");
+        }
+    }
+}
+
+static void sdmgr_refresh_cb(lv_event_t *e)
+{
+    if (lv_event_get_code(e) == LV_EVENT_CLICKED) {
+        sdmgr_start_refresh();
+    }
+}
+
+static void sd_format_task(void *arg)
+{
+    bsp_sdcard_format_t format = (bsp_sdcard_format_t)(uintptr_t)arg;
+
+    lvgl_port_lock(0);
+    if (s_sdmgr_status_label != NULL) {
+        lv_label_set_text_fmt(s_sdmgr_status_label, "格式化%s...", sd_format_name(format));
+    }
+    lvgl_port_unlock();
+
+    esp_err_t ret = bsp_sdcard_format(format);
+    bsp_sdcard_info_t info;
+    char info_text[768];
+    esp_err_t info_ret = bsp_sdcard_get_info(&info);
+    sdmgr_build_info_text(info_text, sizeof(info_text), &info, info_ret);
+    s_sd_format_confirm = false;
+
+    lvgl_port_lock(0);
+    if (s_sdmgr_status_label != NULL) {
+        lv_label_set_text(s_sdmgr_status_label, ret == ESP_OK ? "格式化完成" : "格式化失败");
+    }
+    if (s_sdmgr_info_label != NULL) {
+        lv_label_set_text(s_sdmgr_info_label, info_text);
+    }
+    sd_update_format_labels();
+    lvgl_port_unlock();
+
+    s_sd_format_task_handle = NULL;
+    vTaskDelete(NULL);
+}
+
+static void sd_format_cycle_cb(lv_event_t *e)
+{
+    if (lv_event_get_code(e) != LV_EVENT_CLICKED ||
+        s_sd_format_task_handle != NULL || s_sd_manager_task_handle != NULL) {
+        return;
+    }
+
+    s_sd_format_confirm = false;
+    if (s_sd_format_target == BSP_SDCARD_FORMAT_AUTO) {
+        s_sd_format_target = BSP_SDCARD_FORMAT_FAT32;
+    } else if (s_sd_format_target == BSP_SDCARD_FORMAT_FAT32) {
+        s_sd_format_target = BSP_SDCARD_FORMAT_EXFAT;
+    } else {
+        s_sd_format_target = BSP_SDCARD_FORMAT_AUTO;
+    }
+
+    sd_update_format_labels();
+    if (s_sdmgr_status_label != NULL) {
+        lv_label_set_text_fmt(s_sdmgr_status_label, "格式:%s", sd_format_name(s_sd_format_target));
+    }
+}
+
+static void sd_format_confirm_cb(lv_event_t *e)
+{
+    if (lv_event_get_code(e) != LV_EVENT_CLICKED ||
+        s_sd_format_task_handle != NULL || s_sd_manager_task_handle != NULL) {
+        return;
+    }
+
+    if (!s_sd_format_confirm) {
+        s_sd_format_confirm = true;
+        sd_update_format_labels();
+        if (s_sdmgr_status_label != NULL) {
+            lv_label_set_text_fmt(s_sdmgr_status_label, "再点OK?格式化%s", sd_format_name(s_sd_format_target));
+        }
+        return;
+    }
+
+    s_sd_format_confirm = false;
+    sd_update_format_labels();
+    if (xTaskCreatePinnedToCore(sd_format_task, "sd_format", 5 * 1024,
+                                (void *)(uintptr_t)s_sd_format_target,
+                                4, &s_sd_format_task_handle, 1) != pdPASS) {
+        s_sd_format_task_handle = NULL;
+        if (s_sdmgr_status_label != NULL) {
+            lv_label_set_text(s_sdmgr_status_label, "格式化任务失败");
+        }
+    }
+}
+
 // 返回主界面按钮事件处理函数
 static void btn_sdback_cb(lv_event_t * e)
 {
+    if (s_sd_format_task_handle != NULL) {
+        return;
+    }
+    s_sd_format_confirm = false;
+    s_sd_fs_button_label = NULL;
+    s_sd_fmt_button_label = NULL;
+
     if (file_path_info.path_index == 0){ // 如果当前是根目录
         sd_preview_cleanup();
         bsp_sdcard_unmount(); // 卸载SD卡
@@ -1691,6 +1993,123 @@ static void sdcard_event_handler(lv_event_t * e)
     xTaskCreatePinnedToCore(task_process_sdcard, "task_process_sdcard", 3 * 1024, NULL, 5, NULL, 1);
 }
 
+static lv_obj_t *sdmgr_create_button(lv_obj_t *parent, const char *text, int x, int y, int w,
+                                     lv_color_t color, lv_event_cb_t cb)
+{
+    lv_obj_t *btn = lv_btn_create(parent);
+    lv_obj_set_size(btn, w, 32);
+    lv_obj_align(btn, LV_ALIGN_TOP_LEFT, x, y);
+    lv_obj_set_style_radius(btn, 6, 0);
+    lv_obj_set_style_border_width(btn, 0, 0);
+    lv_obj_set_style_shadow_opa(btn, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_bg_color(btn, color, 0);
+    lv_obj_set_style_bg_opa(btn, LV_OPA_COVER, 0);
+    lv_obj_add_event_cb(btn, cb, LV_EVENT_CLICKED, NULL);
+
+    lv_obj_t *label = lv_label_create(btn);
+    lv_label_set_text(label, text);
+    lv_obj_set_style_text_font(label, &lv_font_montserrat_14, 0);
+    lv_obj_set_style_text_color(label, lv_color_hex(0xffffff), 0);
+    lv_obj_center(label);
+    return label;
+}
+
+static void btn_sdmgr_back_cb(lv_event_t *e)
+{
+    if (lv_event_get_code(e) != LV_EVENT_CLICKED ||
+        s_sd_manager_task_handle != NULL || s_sd_format_task_handle != NULL) {
+        return;
+    }
+
+    s_sd_format_confirm = false;
+    s_sd_fs_button_label = NULL;
+    s_sd_fmt_button_label = NULL;
+    s_sdmgr_status_label = NULL;
+    s_sdmgr_info_label = NULL;
+    bsp_sdcard_unmount();
+    lv_obj_del(icon_in_obj);
+    icon_flag = 0;
+}
+
+static void sdmgr_event_handler(lv_event_t *e)
+{
+    (void)e;
+    static lv_style_t style;
+    lv_style_init(&style);
+    lv_style_set_radius(&style, 0);
+    lv_style_set_bg_opa(&style, LV_OPA_COVER);
+    lv_style_set_bg_color(&style, lv_color_hex(0x0f1720));
+    lv_style_set_border_width(&style, 0);
+    lv_style_set_pad_all(&style, 0);
+    lv_style_set_width(&style, 320);
+    lv_style_set_height(&style, 240);
+
+    icon_in_obj = lv_obj_create(lv_scr_act());
+    lv_obj_add_style(icon_in_obj, &style, 0);
+
+    lv_obj_t *title = lv_obj_create(icon_in_obj);
+    lv_obj_set_size(title, 320, 40);
+    lv_obj_align(title, LV_ALIGN_TOP_LEFT, 0, 0);
+    lv_obj_set_style_pad_all(title, 0, 0);
+    lv_obj_set_style_border_width(title, 0, 0);
+    lv_obj_set_style_bg_color(title, lv_color_hex(0x176b78), 0);
+
+    lv_obj_t *btn_back = lv_btn_create(title);
+    lv_obj_align(btn_back, LV_ALIGN_LEFT_MID, 0, 0);
+    lv_obj_set_size(btn_back, 56, 34);
+    lv_obj_set_style_border_width(btn_back, 0, 0);
+    lv_obj_set_style_pad_all(btn_back, 0, 0);
+    lv_obj_set_style_bg_opa(btn_back, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_shadow_opa(btn_back, LV_OPA_TRANSP, 0);
+    lv_obj_add_event_cb(btn_back, btn_sdmgr_back_cb, LV_EVENT_CLICKED, NULL);
+
+    lv_obj_t *label_back = lv_label_create(btn_back);
+    lv_label_set_text(label_back, LV_SYMBOL_LEFT);
+    lv_obj_set_style_text_font(label_back, &lv_font_montserrat_20, 0);
+    lv_obj_set_style_text_color(label_back, lv_color_hex(0xffffff), 0);
+    lv_obj_center(label_back);
+
+    lv_obj_t *title_label = lv_label_create(title);
+    lv_label_set_text(title_label, "TF管理");
+    lv_obj_set_style_text_font(title_label, &font_alipuhui20, 0);
+    lv_obj_set_style_text_color(title_label, lv_color_hex(0xffffff), 0);
+    lv_obj_center(title_label);
+
+    s_sdmgr_status_label = lv_label_create(icon_in_obj);
+    lv_label_set_text(s_sdmgr_status_label, "扫描中...");
+    lv_obj_set_style_text_font(s_sdmgr_status_label, &font_alipuhui20, 0);
+    lv_obj_set_style_text_color(s_sdmgr_status_label, lv_color_hex(0xd9f4f6), 0);
+    lv_obj_set_width(s_sdmgr_status_label, 300);
+    lv_label_set_long_mode(s_sdmgr_status_label, LV_LABEL_LONG_DOT);
+    lv_obj_align(s_sdmgr_status_label, LV_ALIGN_TOP_MID, 0, 44);
+
+    lv_obj_t *info_panel = lv_obj_create(icon_in_obj);
+    lv_obj_set_size(info_panel, 304, 124);
+    lv_obj_align(info_panel, LV_ALIGN_TOP_LEFT, 8, 70);
+    lv_obj_set_style_radius(info_panel, 6, 0);
+    lv_obj_set_style_border_width(info_panel, 0, 0);
+    lv_obj_set_style_bg_color(info_panel, lv_color_hex(0x172331), 0);
+    lv_obj_set_style_pad_all(info_panel, 6, 0);
+    lv_obj_set_scrollbar_mode(info_panel, LV_SCROLLBAR_MODE_AUTO);
+
+    s_sdmgr_info_label = lv_label_create(info_panel);
+    lv_label_set_text(s_sdmgr_info_label, "读取中...");
+    lv_label_set_long_mode(s_sdmgr_info_label, LV_LABEL_LONG_WRAP);
+    lv_obj_set_width(s_sdmgr_info_label, 288);
+    lv_obj_set_style_text_font(s_sdmgr_info_label, &font_alipuhui20, 0);
+    lv_obj_set_style_text_color(s_sdmgr_info_label, lv_color_hex(0xffffff), 0);
+    lv_obj_align(s_sdmgr_info_label, LV_ALIGN_TOP_LEFT, 0, 0);
+
+    sdmgr_create_button(icon_in_obj, "REF", 6, 202, 48, lv_color_hex(0x287b8f), sdmgr_refresh_cb);
+    s_sd_fs_button_label = sdmgr_create_button(icon_in_obj, "FS", 60, 202, 82, lv_color_hex(0x365b80), sd_format_cycle_cb);
+    sdmgr_create_button(icon_in_obj, "DIR", 148, 202, 82, lv_color_hex(0x2f7a55), sdmgr_prepare_cb);
+    s_sd_fmt_button_label = sdmgr_create_button(icon_in_obj, "FMT", 236, 202, 78, lv_color_hex(0x9b2c2c), sd_format_confirm_cb);
+    sd_update_format_labels();
+
+    icon_flag = 9;
+    sdmgr_start_refresh();
+}
+
 
 
 /******************************** 第4个图标 摄像头 应用程序 *****************************************************************************/
@@ -1698,6 +2117,9 @@ lv_obj_t * img_camera;
 lv_obj_t * camera_status_label;
 static uint8_t *s_camera_display_buf;
 static volatile bool s_camera_save_requested;
+static TaskHandle_t s_camera_task_handle;
+static lv_obj_t *s_camera_page;
+static volatile bool s_camera_running;
 
 // 摄像头图像
 lv_img_dsc_t img_camera_dsc = {
@@ -1711,11 +2133,10 @@ lv_img_dsc_t img_camera_dsc = {
 
 static void camera_set_status(const char *text)
 {
-    if (camera_status_label == NULL) {
-        return;
-    }
     lvgl_port_lock(0);
-    lv_label_set_text(camera_status_label, text);
+    if (camera_status_label != NULL) {
+        lv_label_set_text(camera_status_label, text);
+    }
     lvgl_port_unlock();
 }
 
@@ -1757,6 +2178,7 @@ static void camera_save_frame(camera_fb_t *frame)
 // 摄像头处理任务
 static void task_process_camera(void *arg)
 {
+    lv_obj_t *page = (lv_obj_t *)arg;
     bool camera_started = false;
     const size_t frame_bytes = 240 * 320 * 2;
     if (s_camera_display_buf == NULL) {
@@ -1830,29 +2252,42 @@ static void task_process_camera(void *arg)
 cleanup:
     if (camera_started) {
         esp_camera_deinit(); // 取消初始化摄像头
+        vTaskDelay(pdMS_TO_TICKS(30));
     }
+    dvp_pwdn(1); // 摄像头进入掉电模式
     lvgl_port_lock(0);
-    if (icon_in_obj != NULL) {
-        lv_obj_del(icon_in_obj); // 删除摄像头画布
+    if (page != NULL) {
+        lv_obj_del(page); // 删除摄像头画布
+    }
+    if (icon_in_obj == page) {
         icon_in_obj = NULL;
+    }
+    if (s_camera_page == page) {
+        s_camera_page = NULL;
+        img_camera = NULL;
+        camera_status_label = NULL;
     }
     lvgl_port_unlock();
     if (s_camera_display_buf != NULL) {
         heap_caps_free(s_camera_display_buf);
         s_camera_display_buf = NULL;
     }
-    img_camera = NULL;
-    camera_status_label = NULL;
     s_camera_save_requested = false;
-    dvp_pwdn(1); // 摄像头进入掉电模式
-    icon_flag = 0;
+    if (icon_flag == 4) {
+        icon_flag = 0;
+    }
+    s_camera_running = false;
+    s_camera_task_handle = NULL;
     vTaskDelete(NULL);
 }
 
 // 返回主界面按钮事件处理函数
 static void btn_camback_cb(lv_event_t * e)
 {
-    icon_flag = 0;
+    if (icon_flag == 4) {
+        camera_set_status("关闭中...");
+        icon_flag = 0;
+    }
 }
 
 static void btn_camera_save_cb(lv_event_t * e)
@@ -1864,6 +2299,11 @@ static void btn_camera_save_cb(lv_event_t * e)
 // 进入摄像头应用
 static void camera_event_handler(lv_event_t * e)
 {
+    if (s_camera_running || s_camera_task_handle != NULL) {
+        ESP_LOGW(TAG, "camera is still stopping");
+        return;
+    }
+
     // 创建一个界面对象
     static lv_style_t style;
     lv_style_init(&style);
@@ -1876,6 +2316,7 @@ static void camera_event_handler(lv_event_t * e)
     lv_style_set_height(&style, 240); 
 
     icon_in_obj = lv_obj_create(lv_scr_act());
+    s_camera_page = icon_in_obj;
     lv_obj_add_style(icon_in_obj, &style, 0);
 
     img_camera = lv_img_create(icon_in_obj);
@@ -1927,7 +2368,13 @@ static void camera_event_handler(lv_event_t * e)
 
     icon_flag = 4; // 标记已经进入第四个应用
 
-    xTaskCreatePinnedToCore(task_process_camera, "task_process_camera", 4 * 1024, NULL, 5, NULL, 1);
+    s_camera_running = true;
+    if (xTaskCreatePinnedToCore(task_process_camera, "task_process_camera", 4 * 1024,
+                                s_camera_page, 5, &s_camera_task_handle, 1) != pdPASS) {
+        s_camera_running = false;
+        s_camera_task_handle = NULL;
+        camera_set_status("任务创建失败");
+    }
 }
 
 
@@ -1972,6 +2419,9 @@ typedef struct {
 #define WIFI_HISTORY_MAX 10
 #define WIFI_HISTORY_PATH SD_MOUNT_POINT "/szpi/config/wlan_history.ini"
 #define RANDOM_WIFI_CONFIG_PATH SD_MOUNT_POINT "/szpi/config/wifi.ini"
+#define WIFI_NVS_NAMESPACE "szpi_wifi"
+#define WIFI_NVS_HISTORY_KEY "history"
+#define WIFI_NVS_COUNT_KEY "count"
 
 typedef struct {
     char ssid[33];
@@ -2053,6 +2503,45 @@ static void wifi_history_commit_entry(char *ssid, char *password, wifi_auth_mode
     password[0] = '\0';
 }
 
+static void wifi_history_load_nvs(void)
+{
+    nvs_handle_t nvs;
+    esp_err_t ret = nvs_open(WIFI_NVS_NAMESPACE, NVS_READONLY, &nvs);
+    if (ret != ESP_OK) {
+        return;
+    }
+
+    uint32_t count = 0;
+    size_t blob_size = sizeof(s_wifi_history);
+    if (nvs_get_u32(nvs, WIFI_NVS_COUNT_KEY, &count) == ESP_OK &&
+        nvs_get_blob(nvs, WIFI_NVS_HISTORY_KEY, s_wifi_history, &blob_size) == ESP_OK) {
+        size_t max_count = blob_size / sizeof(s_wifi_history[0]);
+        if (count > WIFI_HISTORY_MAX) {
+            count = WIFI_HISTORY_MAX;
+        }
+        if (count > max_count) {
+            count = max_count;
+        }
+        s_wifi_history_count = count;
+    }
+    nvs_close(nvs);
+}
+
+static void wifi_history_save_nvs(void)
+{
+    nvs_handle_t nvs;
+    esp_err_t ret = nvs_open(WIFI_NVS_NAMESPACE, NVS_READWRITE, &nvs);
+    if (ret != ESP_OK) {
+        return;
+    }
+
+    nvs_set_u32(nvs, WIFI_NVS_COUNT_KEY, (uint32_t)s_wifi_history_count);
+    nvs_set_blob(nvs, WIFI_NVS_HISTORY_KEY, s_wifi_history,
+                 sizeof(s_wifi_history[0]) * s_wifi_history_count);
+    nvs_commit(nvs);
+    nvs_close(nvs);
+}
+
 static void wifi_history_load(void)
 {
     if (s_wifi_history_loaded) {
@@ -2061,6 +2550,7 @@ static void wifi_history_load(void)
 
     s_wifi_history_loaded = true;
     s_wifi_history_count = 0;
+    wifi_history_load_nvs();
 
     if (bsp_sdcard_mount() != ESP_OK) {
         return;
@@ -2109,6 +2599,8 @@ static void wifi_history_load(void)
 
 static void wifi_history_save_all(void)
 {
+    wifi_history_save_nvs();
+
     if (bsp_sdcard_mount() != ESP_OK) {
         return;
     }
@@ -2651,6 +3143,7 @@ static esp_err_t wifi_ensure_sta_started(void)
         if (ret != ESP_OK && ret != ESP_ERR_INVALID_STATE) {
             return ret;
         }
+        (void)esp_wifi_set_storage(WIFI_STORAGE_FLASH);
     }
 
     if (!s_wifi_handlers_registered) {
@@ -3434,6 +3927,7 @@ static const home_app_item_t s_home_apps[] = {
     { "姿态",   "QMI8658", 0xf06d2f, HOME_ICON_IMAGE,  &img_att_icon,     att_event_handler },
     { "音乐",   "Player", 0x4c7bd9, HOME_ICON_IMAGE,  &img_music_icon,   music_event_handler },
     { "TF卡",   "Files",  0x009688, HOME_ICON_IMAGE,  &img_sd_icon,      sdcard_event_handler },
+    { "TF管理", "Disk",   0x176b78, HOME_ICON_IMAGE,  &img_sd_icon,      sdmgr_event_handler },
     { "录音",   "WAV",    0x2c8dbf, HOME_ICON_SYMBOL, LV_SYMBOL_AUDIO,   recorder_event_handler },
     { "摄像头", "Camera", 0xd8a318, HOME_ICON_IMAGE,  &img_camera_icon,  camera_event_handler },
     { "WLAN",   "Scan",   0xc85a5a, HOME_ICON_IMAGE,  &img_wifiset_icon, wifiset_event_handler },

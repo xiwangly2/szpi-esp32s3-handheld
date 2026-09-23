@@ -48,7 +48,8 @@ Successful connections from the WLAN UI are saved to:
 ```
 
 The firmware keeps recent networks so the next connection can skip password
-entry when the SSID is seen again.
+entry when the SSID is seen again. The same history is also mirrored into device
+NVS as a no-card fallback.
 
 ## File Systems
 
@@ -67,6 +68,38 @@ Recommended card format:
 - one Microsoft Basic Data partition
 - GPT is supported by the bundled FatFs scanner and is the intended setup for
   modern large TF cards
+
+The launcher has two TF-card entries:
+
+- `TF卡`: file browsing and media preview
+- `TF管理`: card information, product-directory initialization, and formatting
+
+The TF manager can identify the card capacity, mounted FAT variant, partition
+table style, and the first few partition entries:
+
+- GPT
+- MBR
+- raw FAT/superfloppy with no partition table
+
+It can format the mounted TF card. Use `FS` to choose:
+
+- `Auto`: FatFs chooses a suitable FAT/exFAT variant
+- `FAT32`: maximum compatibility
+- `exFAT`: larger media cards and large files
+
+Formatting requires tapping `FMT` and then `OK?`. It erases the TF card and
+recreates the `/szpi` product directories.
+
+`DIR` recreates the `/szpi` product directories without formatting.
+
+Multi-partition cards are currently detected and displayed, but the device UI
+does not yet switch between multiple mounted volumes. The firmware still mounts
+one FatFs volume at `/sdcard`.
+
+USB-ZIP, USB-FDD, and HDD modes are legacy PC BIOS boot-disk layout concepts.
+They are not SDMMC electrical modes and are not required for this handheld to
+use a TF card. Treat them as future boot-disk authoring features, not normal
+card filesystem choices.
 
 Compatibility fallback:
 
