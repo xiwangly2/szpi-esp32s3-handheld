@@ -2441,6 +2441,9 @@ static wifi_ap_record_t s_wifi_ap_records[DEFAULT_SCAN_LIST_SIZE];
 static uint16_t s_wifi_ap_count;
 static bool s_wifi_handlers_registered;
 static bool s_wifi_driver_started;
+static bool s_wifi_autoconnect_started;
+static bool s_time_sync_started;
+static lv_timer_t *s_time_update_timer;
 static int s_wifi_retry_num;
 
 static char *wifi_trim(char *text)
@@ -2460,6 +2463,24 @@ static char *wifi_trim(char *text)
     return text;
 }
 
+static void wifi_config_set_credentials(wifi_config_t *config, const char *ssid, const char *password)
+{
+    if (config == NULL) {
+        return;
+    }
+
+    const char *safe_ssid = ssid ? ssid : "";
+    const char *safe_password = password ? password : "";
+    size_t ssid_len = strnlen(safe_ssid, sizeof(config->sta.ssid));
+    size_t password_len = strnlen(safe_password, sizeof(config->sta.password) - 1);
+
+    memset(config->sta.ssid, 0, sizeof(config->sta.ssid));
+    memset(config->sta.password, 0, sizeof(config->sta.password));
+    memcpy(config->sta.ssid, safe_ssid, ssid_len);
+    memcpy(config->sta.password, safe_password, password_len);
+    config->sta.threshold.authmode = password_len == 0 ? WIFI_AUTH_OPEN : WIFI_AUTH_WPA_PSK;
+}
+
 static void wifi_history_upsert(const char *ssid, const char *password, wifi_auth_mode_t authmode)
 {
     if (ssid == NULL || ssid[0] == '\0') {
@@ -2468,8 +2489,16 @@ static void wifi_history_upsert(const char *ssid, const char *password, wifi_aut
 
     for (size_t i = 0; i < s_wifi_history_count; i++) {
         if (strcmp(s_wifi_history[i].ssid, ssid) == 0) {
-            snprintf(s_wifi_history[i].password, sizeof(s_wifi_history[i].password), "%s", password ? password : "");
-            s_wifi_history[i].authmode = authmode;
+            wifi_saved_network_t entry = s_wifi_history[i];
+            snprintf(entry.password, sizeof(entry.password), "%s", password ? password : "");
+            entry.authmode = authmode;
+            if (i + 1 < s_wifi_history_count) {
+                memmove(&s_wifi_history[i], &s_wifi_history[i + 1],
+                        sizeof(s_wifi_history[0]) * (s_wifi_history_count - i - 1));
+                s_wifi_history[s_wifi_history_count - 1] = entry;
+            } else {
+                s_wifi_history[i] = entry;
+            }
             return;
         }
     }
@@ -3029,6 +3058,9 @@ struct tm timeinfo;
 // 更新时间函数
 void value_update_cb(lv_timer_t * timer)
 {
+    if (time_label == NULL || date_label == NULL) {
+        return;
+    }
     // 更新日期 星期 时分秒
     time(&now);
     localtime_r(&now, &timeinfo);
@@ -3059,27 +3091,48 @@ static void get_time_task(void *pvParameters)
     localtime_r(&now, &timeinfo);
 
     lvgl_port_lock(0);
-    lv_obj_del(main_text_label); // 删除主页的欢迎语 
+    if (main_text_label != NULL) {
+        lv_obj_del(main_text_label); // 删除主页的欢迎语
+        main_text_label = NULL;
+    }
     // 显示年月日
-    date_label = lv_label_create(main_obj);
-    lv_obj_set_style_text_font(date_label, &font_alipuhui20, 0);
-    lv_obj_set_style_text_color(date_label, lv_color_hex(0xffffff), 0); 
+    if (date_label == NULL) {
+        date_label = lv_label_create(main_obj);
+        lv_obj_set_style_text_font(date_label, &font_alipuhui20, 0);
+        lv_obj_set_style_text_color(date_label, lv_color_hex(0xffffff), 0);
+        lv_obj_align(date_label, LV_ALIGN_TOP_LEFT, 10, 5);
+    }
     lv_label_set_text_fmt(date_label, "%d年%02d月%02d日", timeinfo.tm_year+1900, timeinfo.tm_mon+1, timeinfo.tm_mday);
-    lv_obj_align(date_label, LV_ALIGN_TOP_LEFT, 10, 5);
 
     // 显示时间  小时:分钟:秒钟
-    time_label = lv_label_create(main_obj);
-    lv_obj_set_style_text_font(time_label, &font_alipuhui20, 0);
-    lv_obj_set_style_text_color(time_label, lv_color_hex(0xffffff), 0); 
+    if (time_label == NULL) {
+        time_label = lv_label_create(main_obj);
+        lv_obj_set_style_text_font(time_label, &font_alipuhui20, 0);
+        lv_obj_set_style_text_color(time_label, lv_color_hex(0xffffff), 0);
+        lv_obj_align_to(time_label, date_label, LV_ALIGN_OUT_RIGHT_MID, 10, 0);
+    }
     lv_label_set_text_fmt(time_label, "%02d:%02d:%02d", timeinfo.tm_hour, timeinfo.tm_min, timeinfo.tm_sec);
-    lv_obj_align_to(time_label, date_label, LV_ALIGN_OUT_RIGHT_MID, 10, 0);
+    if (s_time_update_timer == NULL) {
+        s_time_update_timer = lv_timer_create(value_update_cb, 1000, NULL);  // 创建一个lv_timer 每秒更新一次时间
+    }
     lvgl_port_unlock();
 
     xEventGroupSetBits(s_wifi_event_group, WIFI_GET_SNTP_BIT);
-
-    lv_timer_create(value_update_cb, 1000, NULL);  // 创建一个lv_timer 每秒更新一次时间
     
     vTaskDelete(NULL);
+}
+
+static void wifi_start_time_sync_once(void)
+{
+    if (s_time_sync_started) {
+        return;
+    }
+    s_time_sync_started = true;
+    BaseType_t ok = xTaskCreatePinnedToCore(get_time_task, "get_time_task", 3 * 1024, NULL, 5, NULL, 0);
+    if (ok != pdPASS) {
+        s_time_sync_started = false;
+        ESP_LOGE(TAG, "create get_time_task failed");
+    }
 }
 
 // 网络连接 事件处理函数
@@ -3102,6 +3155,7 @@ static void event_handler(void* arg, esp_event_base_t event_base,
         ESP_LOGI(TAG, "got ip:" IPSTR, IP2STR(&event->ip_info.ip));
         s_wifi_retry_num = 0;
         xEventGroupSetBits(s_wifi_event_group, WIFI_CONNECTED_BIT);
+        wifi_start_time_sync_once();
     }
 }
 
@@ -3185,6 +3239,83 @@ static esp_err_t wifi_ensure_sta_started(void)
     return ESP_OK;
 }
 
+static void wifi_autoconnect_task(void *arg)
+{
+    vTaskDelay(pdMS_TO_TICKS(800));
+    wifi_history_load();
+    if (s_wifi_history_count == 0) {
+        ESP_LOGI(TAG, "no saved WLAN for autoconnect");
+        s_wifi_autoconnect_started = false;
+        vTaskDelete(NULL);
+        return;
+    }
+
+    const wifi_saved_network_t *saved = &s_wifi_history[s_wifi_history_count - 1];
+    if (saved->ssid[0] == '\0') {
+        s_wifi_autoconnect_started = false;
+        vTaskDelete(NULL);
+        return;
+    }
+
+    esp_err_t ret = wifi_ensure_sta_started();
+    if (ret != ESP_OK) {
+        ESP_LOGW(TAG, "WLAN autoconnect start failed: %s", esp_err_to_name(ret));
+        s_wifi_autoconnect_started = false;
+        vTaskDelete(NULL);
+        return;
+    }
+
+    wifi_config_t wifi_config = {
+        .sta = {
+            .sae_pwe_h2e = WPA3_SAE_PWE_BOTH,
+            .sae_h2e_identifier = "",
+        },
+    };
+    wifi_config_set_credentials(&wifi_config, saved->ssid, saved->password);
+
+    xEventGroupClearBits(s_wifi_event_group, WIFI_CONNECTED_BIT | WIFI_FAIL_BIT);
+    s_wifi_retry_num = 0;
+    ret = esp_wifi_set_config(WIFI_IF_STA, &wifi_config);
+    if (ret == ESP_OK) {
+        ESP_LOGI(TAG, "WLAN autoconnect SSID:%s", saved->ssid);
+        (void)esp_wifi_disconnect();
+        ret = esp_wifi_connect();
+    }
+    if (ret != ESP_OK) {
+        ESP_LOGW(TAG, "WLAN autoconnect failed: %s", esp_err_to_name(ret));
+        s_wifi_autoconnect_started = false;
+        vTaskDelete(NULL);
+        return;
+    }
+
+    EventBits_t bits = xEventGroupWaitBits(s_wifi_event_group,
+                                           WIFI_CONNECTED_BIT | WIFI_FAIL_BIT,
+                                           pdFALSE,
+                                           pdFALSE,
+                                           pdMS_TO_TICKS(20000));
+    if (bits & WIFI_CONNECTED_BIT) {
+        ESP_LOGI(TAG, "WLAN autoconnect connected: %s", saved->ssid);
+    } else {
+        ESP_LOGW(TAG, "WLAN autoconnect did not connect: %s", saved->ssid);
+        xEventGroupClearBits(s_wifi_event_group, WIFI_FAIL_BIT);
+        s_wifi_autoconnect_started = false;
+    }
+    vTaskDelete(NULL);
+}
+
+static void wifi_start_autoconnect(void)
+{
+    if (s_wifi_autoconnect_started) {
+        return;
+    }
+    s_wifi_autoconnect_started = true;
+    BaseType_t ok = xTaskCreatePinnedToCore(wifi_autoconnect_task, "wifi_auto", 5 * 1024, NULL, 4, NULL, 0);
+    if (ok != pdPASS) {
+        s_wifi_autoconnect_started = false;
+        ESP_LOGE(TAG, "create wifi_auto task failed");
+    }
+}
+
 // 扫描附近wifi
 static esp_err_t wifi_scan(wifi_ap_record_t ap_info[], uint16_t *ap_number)
 {
@@ -3239,9 +3370,7 @@ static void wifi_connect(void *arg)
                     .sae_h2e_identifier = "",
                     },
             };
-            snprintf((char *)wifi_config.sta.ssid, sizeof(wifi_config.sta.ssid), "%s", wifi_account.wifi_ssid);
-            snprintf((char *)wifi_config.sta.password, sizeof(wifi_config.sta.password), "%s", wifi_account.wifi_password);
-            wifi_config.sta.threshold.authmode = wifi_account.wifi_password[0] == '\0' ? WIFI_AUTH_OPEN : WIFI_AUTH_WPA_PSK;
+            wifi_config_set_credentials(&wifi_config, wifi_account.wifi_ssid, wifi_account.wifi_password);
 
             esp_err_t ret = wifi_ensure_sta_started();
             if (ret != ESP_OK) {
@@ -3310,7 +3439,6 @@ static void wifi_connect(void *arg)
                 vQueueDelete(xQueueWifiAccount); // 删除队列
                 xQueueWifiAccount = NULL;
                 icon_flag = 0; // 标记回到主界面
-                xTaskCreatePinnedToCore(get_time_task, "get_time_task", 2 * 1024, NULL, 5, NULL, 0);  // 创建获取时间任务
                 break; // 跳出while循环删除任务
             } else if (bits & WIFI_FAIL_BIT) {
                 ESP_LOGI(TAG, "Failed to connect to SSID:%s, password:%s", wifi_config.sta.ssid, wifi_config.sta.password);
@@ -4319,5 +4447,7 @@ void lv_main_page(void)
 
     icon_flag = 0;
     lvgl_port_unlock();
+
+    wifi_start_autoconnect();
 }
 
