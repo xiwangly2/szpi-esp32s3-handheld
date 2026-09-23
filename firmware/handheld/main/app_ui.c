@@ -4012,6 +4012,385 @@ static void recorder_event_handler(lv_event_t *e)
 }
 
 
+/******************************** 媒体库 应用程序 *****************************************************************************/
+#define MEDIA_LIBRARY_ICON_FLAG 10
+#define MEDIA_INDEX_PATH SD_MOUNT_POINT "/szpi/cache/media_index.tsv"
+#define MEDIA_SCAN_MAX_FILES 1200
+#define MEDIA_SCAN_MAX_DEPTH 8
+
+typedef struct {
+    uint32_t files;
+    uint32_t dirs;
+    uint32_t images;
+    uint32_t audio;
+    uint32_t videos;
+    uint32_t text;
+    uint32_t other;
+    uint64_t image_bytes;
+    uint64_t audio_bytes;
+    uint64_t video_bytes;
+    uint64_t text_bytes;
+    uint64_t other_bytes;
+    bool limit_reached;
+} media_index_stats_t;
+
+typedef struct {
+    FILE *index;
+    media_index_stats_t stats;
+} media_scan_ctx_t;
+
+static lv_obj_t *s_media_status_label;
+static lv_obj_t *s_media_info_label;
+static TaskHandle_t s_media_scan_task_handle;
+static volatile bool s_media_page_active;
+static media_index_stats_t s_media_last_stats;
+
+static const char *media_type_name(sd_file_type_t type)
+{
+    switch (type) {
+    case SD_FILE_AUDIO:
+        return "audio";
+    case SD_FILE_VIDEO:
+        return "video";
+    case SD_FILE_IMAGE_JPEG:
+    case SD_FILE_IMAGE_PNG:
+    case SD_FILE_IMAGE_GIF:
+        return "image";
+    case SD_FILE_TEXT:
+        return "text";
+    case SD_FILE_OTHER:
+    default:
+        return "other";
+    }
+}
+
+static void media_stats_add_file(media_index_stats_t *stats, sd_file_type_t type, uint64_t bytes)
+{
+    stats->files++;
+    switch (type) {
+    case SD_FILE_AUDIO:
+        stats->audio++;
+        stats->audio_bytes += bytes;
+        break;
+    case SD_FILE_VIDEO:
+        stats->videos++;
+        stats->video_bytes += bytes;
+        break;
+    case SD_FILE_IMAGE_JPEG:
+    case SD_FILE_IMAGE_PNG:
+    case SD_FILE_IMAGE_GIF:
+        stats->images++;
+        stats->image_bytes += bytes;
+        break;
+    case SD_FILE_TEXT:
+        stats->text++;
+        stats->text_bytes += bytes;
+        break;
+    case SD_FILE_OTHER:
+    default:
+        stats->other++;
+        stats->other_bytes += bytes;
+        break;
+    }
+}
+
+static void media_write_escaped(FILE *f, const char *text)
+{
+    for (const unsigned char *p = (const unsigned char *)text; p != NULL && *p != '\0'; p++) {
+        if (*p == '\t' || *p == '\r' || *p == '\n') {
+            fputc(' ', f);
+        } else {
+            fputc(*p, f);
+        }
+    }
+}
+
+static void media_index_write_row(FILE *f, sd_file_type_t type, uint64_t bytes, const char *path)
+{
+    if (f == NULL) {
+        return;
+    }
+    fputs(media_type_name(type), f);
+    fprintf(f, "\t%llu\t", (unsigned long long)bytes);
+    media_write_escaped(f, path);
+    fputc('\n', f);
+}
+
+static void media_scan_dir(media_scan_ctx_t *ctx, const char *path, int depth)
+{
+    if (ctx->stats.files >= MEDIA_SCAN_MAX_FILES) {
+        ctx->stats.limit_reached = true;
+        return;
+    }
+    if (depth > MEDIA_SCAN_MAX_DEPTH) {
+        return;
+    }
+
+    DIR *dir = opendir(path);
+    if (dir == NULL) {
+        return;
+    }
+
+    ctx->stats.dirs++;
+    struct dirent *ent;
+    while ((ent = readdir(dir)) != NULL) {
+        if (strcmp(ent->d_name, ".") == 0 || strcmp(ent->d_name, "..") == 0) {
+            continue;
+        }
+
+        char child[512];
+        int written = snprintf(child, sizeof(child), "%s/%s", path, ent->d_name);
+        if (written <= 0 || written >= (int)sizeof(child)) {
+            continue;
+        }
+
+        struct stat st;
+        if (stat(child, &st) != 0) {
+            continue;
+        }
+
+        if (S_ISDIR(st.st_mode)) {
+            media_scan_dir(ctx, child, depth + 1);
+        } else if (S_ISREG(st.st_mode)) {
+            if (ctx->stats.files >= MEDIA_SCAN_MAX_FILES) {
+                ctx->stats.limit_reached = true;
+                break;
+            }
+            sd_file_type_t type = sd_classify_file(child);
+            uint64_t bytes = st.st_size > 0 ? (uint64_t)st.st_size : 0;
+            media_stats_add_file(&ctx->stats, type, bytes);
+            media_index_write_row(ctx->index, type, bytes, child);
+        }
+
+        if (ctx->stats.limit_reached) {
+            break;
+        }
+    }
+    closedir(dir);
+}
+
+static void media_build_summary(const media_index_stats_t *stats, char *out, size_t out_len)
+{
+    char image_size[24];
+    char audio_size[24];
+    char video_size[24];
+    char text_size[24];
+    char other_size[24];
+    sd_format_bytes_u64(image_size, sizeof(image_size), stats->image_bytes);
+    sd_format_bytes_u64(audio_size, sizeof(audio_size), stats->audio_bytes);
+    sd_format_bytes_u64(video_size, sizeof(video_size), stats->video_bytes);
+    sd_format_bytes_u64(text_size, sizeof(text_size), stats->text_bytes);
+    sd_format_bytes_u64(other_size, sizeof(other_size), stats->other_bytes);
+
+    snprintf(out, out_len,
+             "文件:%lu 目录:%lu\n"
+             "图片:%lu  %s\n"
+             "音频:%lu  %s\n"
+             "视频:%lu  %s\n"
+             "文本:%lu  %s\n"
+             "其他:%lu  %s\n"
+             "索引: /szpi/cache/media_index.tsv%s",
+             (unsigned long)stats->files,
+             (unsigned long)stats->dirs,
+             (unsigned long)stats->images, image_size,
+             (unsigned long)stats->audio, audio_size,
+             (unsigned long)stats->videos, video_size,
+             (unsigned long)stats->text, text_size,
+             (unsigned long)stats->other, other_size,
+             stats->limit_reached ? "\n已达到本次扫描上限" : "");
+}
+
+static void media_update_ui(const char *status, const media_index_stats_t *stats)
+{
+    if (!s_media_page_active) {
+        return;
+    }
+
+    char info[512];
+    media_build_summary(stats, info, sizeof(info));
+
+    lvgl_port_lock(0);
+    if (s_media_status_label != NULL) {
+        lv_label_set_text(s_media_status_label, status);
+    }
+    if (s_media_info_label != NULL) {
+        lv_label_set_text(s_media_info_label, info);
+    }
+    lvgl_port_unlock();
+}
+
+static void media_scan_task(void *arg)
+{
+    (void)arg;
+    media_scan_ctx_t ctx = {0};
+    esp_err_t ret = bsp_sdcard_mount();
+    if (ret != ESP_OK) {
+        media_update_ui("TF卡不可用", &ctx.stats);
+        s_media_scan_task_handle = NULL;
+        vTaskDelete(NULL);
+        return;
+    }
+
+    mkdir(SD_MOUNT_POINT "/szpi", 0775);
+    mkdir(SD_MOUNT_POINT "/szpi/cache", 0775);
+
+    ctx.index = fopen(MEDIA_INDEX_PATH, "w");
+    if (ctx.index != NULL) {
+        fputs("type\tsize\tpath\n", ctx.index);
+    }
+    media_scan_dir(&ctx, SD_MOUNT_POINT, 0);
+    if (ctx.index != NULL) {
+        fclose(ctx.index);
+    }
+
+    s_media_last_stats = ctx.stats;
+    media_update_ui(ctx.stats.limit_reached ? "索引完成(已截断)" : "索引完成", &ctx.stats);
+    s_media_scan_task_handle = NULL;
+    vTaskDelete(NULL);
+}
+
+static void media_start_scan(void)
+{
+    if (s_media_scan_task_handle != NULL) {
+        if (s_media_status_label != NULL) {
+            lv_label_set_text(s_media_status_label, "正在索引...");
+        }
+        return;
+    }
+
+    if (s_media_status_label != NULL) {
+        lv_label_set_text(s_media_status_label, "正在索引...");
+    }
+    BaseType_t ok = xTaskCreatePinnedToCore(media_scan_task, "media_scan", 10 * 1024,
+                                            NULL, 4, &s_media_scan_task_handle, 1);
+    if (ok != pdPASS) {
+        s_media_scan_task_handle = NULL;
+        if (s_media_status_label != NULL) {
+            lv_label_set_text(s_media_status_label, "任务创建失败");
+        }
+    }
+}
+
+static void media_scan_cb(lv_event_t *e)
+{
+    if (lv_event_get_code(e) == LV_EVENT_CLICKED) {
+        media_start_scan();
+    }
+}
+
+static void media_back_cb(lv_event_t *e)
+{
+    if (lv_event_get_code(e) != LV_EVENT_CLICKED) {
+        return;
+    }
+
+    s_media_page_active = false;
+    s_media_status_label = NULL;
+    s_media_info_label = NULL;
+    if (icon_in_obj != NULL) {
+        lv_obj_del(icon_in_obj);
+        icon_in_obj = NULL;
+    }
+    icon_flag = 0;
+}
+
+static lv_obj_t *media_create_button(lv_obj_t *parent, const char *text, int x, int w,
+                                     lv_color_t color, lv_event_cb_t cb)
+{
+    lv_obj_t *btn = lv_btn_create(parent);
+    lv_obj_set_size(btn, w, 34);
+    lv_obj_align(btn, LV_ALIGN_BOTTOM_LEFT, x, -8);
+    lv_obj_set_style_radius(btn, 6, 0);
+    lv_obj_set_style_border_width(btn, 0, 0);
+    lv_obj_set_style_shadow_opa(btn, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_bg_color(btn, color, 0);
+    lv_obj_add_event_cb(btn, cb, LV_EVENT_CLICKED, NULL);
+
+    lv_obj_t *label = lv_label_create(btn);
+    lv_label_set_text(label, text);
+    lv_obj_set_style_text_font(label, &font_alipuhui20, 0);
+    lv_obj_set_style_text_color(label, lv_color_hex(0xffffff), 0);
+    lv_obj_center(label);
+    return btn;
+}
+
+static void media_event_handler(lv_event_t *e)
+{
+    (void)e;
+    static lv_style_t style;
+    lv_style_init(&style);
+    lv_style_set_radius(&style, 0);
+    lv_style_set_bg_opa(&style, LV_OPA_COVER);
+    lv_style_set_bg_color(&style, lv_color_hex(0x111827));
+    lv_style_set_border_width(&style, 0);
+    lv_style_set_pad_all(&style, 0);
+    lv_style_set_width(&style, 320);
+    lv_style_set_height(&style, 240);
+
+    icon_in_obj = lv_obj_create(lv_scr_act());
+    lv_obj_add_style(icon_in_obj, &style, 0);
+
+    lv_obj_t *title = lv_obj_create(icon_in_obj);
+    lv_obj_set_size(title, 320, 40);
+    lv_obj_align(title, LV_ALIGN_TOP_LEFT, 0, 0);
+    lv_obj_set_style_pad_all(title, 0, 0);
+    lv_obj_set_style_border_width(title, 0, 0);
+    lv_obj_set_style_bg_color(title, lv_color_hex(0x5c6f91), 0);
+
+    lv_obj_t *btn_back = lv_btn_create(title);
+    lv_obj_align(btn_back, LV_ALIGN_LEFT_MID, 0, 0);
+    lv_obj_set_size(btn_back, 56, 34);
+    lv_obj_set_style_border_width(btn_back, 0, 0);
+    lv_obj_set_style_pad_all(btn_back, 0, 0);
+    lv_obj_set_style_bg_opa(btn_back, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_shadow_opa(btn_back, LV_OPA_TRANSP, 0);
+    lv_obj_add_event_cb(btn_back, media_back_cb, LV_EVENT_CLICKED, NULL);
+
+    lv_obj_t *label_back = lv_label_create(btn_back);
+    lv_label_set_text(label_back, LV_SYMBOL_LEFT);
+    lv_obj_set_style_text_font(label_back, &lv_font_montserrat_20, 0);
+    lv_obj_set_style_text_color(label_back, lv_color_hex(0xffffff), 0);
+    lv_obj_center(label_back);
+
+    lv_obj_t *title_label = lv_label_create(title);
+    lv_label_set_text(title_label, "媒体库");
+    lv_obj_set_style_text_font(title_label, &font_alipuhui20, 0);
+    lv_obj_set_style_text_color(title_label, lv_color_hex(0xffffff), 0);
+    lv_obj_center(title_label);
+
+    s_media_status_label = lv_label_create(icon_in_obj);
+    lv_label_set_text(s_media_status_label, "Ready");
+    lv_obj_set_style_text_font(s_media_status_label, &font_alipuhui20, 0);
+    lv_obj_set_style_text_color(s_media_status_label, lv_color_hex(0xe8eef9), 0);
+    lv_obj_align(s_media_status_label, LV_ALIGN_TOP_LEFT, 12, 48);
+
+    lv_obj_t *panel = lv_obj_create(icon_in_obj);
+    lv_obj_set_size(panel, 296, 132);
+    lv_obj_align(panel, LV_ALIGN_TOP_LEFT, 12, 76);
+    lv_obj_set_style_radius(panel, 6, 0);
+    lv_obj_set_style_border_width(panel, 0, 0);
+    lv_obj_set_style_bg_color(panel, lv_color_hex(0x1f2937), 0);
+    lv_obj_set_style_pad_all(panel, 8, 0);
+    lv_obj_set_scrollbar_mode(panel, LV_SCROLLBAR_MODE_AUTO);
+
+    s_media_info_label = lv_label_create(panel);
+    lv_obj_set_width(s_media_info_label, 276);
+    lv_label_set_long_mode(s_media_info_label, LV_LABEL_LONG_WRAP);
+    lv_obj_set_style_text_font(s_media_info_label, &font_alipuhui20, 0);
+    lv_obj_set_style_text_color(s_media_info_label, lv_color_hex(0xffffff), 0);
+    lv_label_set_text(s_media_info_label, "等待扫描...");
+
+    media_create_button(icon_in_obj, "SCAN", 106, 108, lv_color_hex(0x3662a3), media_scan_cb);
+
+    s_media_page_active = true;
+    icon_flag = MEDIA_LIBRARY_ICON_FLAG;
+    if (s_media_last_stats.files > 0) {
+        media_update_ui("上次索引", &s_media_last_stats);
+    }
+    media_start_scan();
+}
+
+
 /******************************** 主界面  ******************************/
 
 LV_IMG_DECLARE(img_att_icon);
@@ -4060,6 +4439,7 @@ static const home_app_item_t s_home_apps[] = {
     { "姿态",   "QMI8658", 0xf06d2f, HOME_ICON_IMAGE,  &img_att_icon,     att_event_handler },
     { "音乐",   "Player", 0x4c7bd9, HOME_ICON_IMAGE,  &img_music_icon,   music_event_handler },
     { "TF卡",   "Files",  0x009688, HOME_ICON_IMAGE,  &img_sd_icon,      sdcard_event_handler },
+    { "媒体库", "Index",  0x5c6f91, HOME_ICON_SYMBOL, LV_SYMBOL_LIST,    media_event_handler },
     { "TF管理", "Disk",   0x176b78, HOME_ICON_IMAGE,  &img_sd_icon,      sdmgr_event_handler },
     { "录音",   "WAV",    0x2c8dbf, HOME_ICON_SYMBOL, LV_SYMBOL_AUDIO,   recorder_event_handler },
     { "摄像头", "Camera", 0xd8a318, HOME_ICON_IMAGE,  &img_camera_icon,  camera_event_handler },

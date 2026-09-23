@@ -8,6 +8,7 @@ Recommended layout:
 /szpi/config/wifi.ini
 /szpi/config/wlan_history.ini
 /szpi/cache/random/latest.jpg
+/szpi/cache/media_index.tsv
 /szpi/photos/
 /szpi/recordings/
 /szpi/music/
@@ -91,6 +92,21 @@ Formatting requires tapping `FMT` and then `OK?`. It erases the mounted data
 volume and recreates the `/szpi` product directories.
 
 `DIR` recreates the `/szpi` product directories without formatting.
+
+## Media Index
+
+The `媒体库` page scans the mounted TF card in a background task and writes a
+lightweight tab-separated index to:
+
+```text
+/szpi/cache/media_index.tsv
+```
+
+The current index stores file type, byte size, and absolute TF path. It is meant
+as the base for richer media browsing, thumbnails, and incremental background
+updates. The first implementation deliberately avoids decoding thumbnails during
+the scan so it does not compete heavily with camera preview, random-image JPEG
+decode, or audio playback.
 
 Multi-partition cards are currently detected and displayed, but the device UI
 does not yet switch between multiple mounted volumes. The firmware still mounts

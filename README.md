@@ -7,6 +7,7 @@
 - LVGL 双页启动器，支持触摸翻页和用户自定义按键翻页。
 - 随机图片应用：HTTPS 拉图、加载态、缓存到 TF 卡、全屏/状态栏切换、自定义按键刷新。
 - TF 卡文件管理：图片、GIF、文本、MP3/WAV 预览入口，并对大文件自动跳过预览以避免卡屏。
+- 媒体库：后台扫描 TF 卡媒体文件，统计图片、音频、视频、文本并生成轻量索引。
 - 音乐播放器：扫描 TF 卡音乐目录。
 - 录音机：板载麦克风录制 16 kHz mono WAV 到 TF 卡。
 - 摄像头：实时预览和拍照保存到 TF 卡。
@@ -15,7 +16,7 @@
 - BLE HID 示例页：做了重复进入/退出的稳定性保护。
 - 姿态页面：QMI8658 读数失败时避免用坏数据刷新 UI。
 
-仍在探索的方向：A2DP 蓝牙音箱/麦克风、USB 摄像头、小视频播放/录像、更完整的媒体库、媒体缩略图和后台索引。
+仍在探索的方向：BLE 音频或外接 A2DP 模块、USB 摄像头、小视频播放/录像、媒体缩略图和后台增量索引。
 
 ## 仓库结构
 
@@ -71,6 +72,7 @@ PHP API 默认 key 是 `change-me`，部署时复制 `backend/image-api/config.s
 - [VS Code ESP-IDF](docs/vscode-esp-idf.md)
 - [Windows Environment](docs/windows-environment.md)
 - [Feature Notes](docs/features.md)
+- [Roadmap](docs/roadmap.md)
 - [Release Build](docs/release.md)
 
 ## 开源发布建议
