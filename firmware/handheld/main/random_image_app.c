@@ -21,6 +21,7 @@
 #include "esp_wifi.h"
 #include "esp32_s3_szp.h"
 #include "freertos/event_groups.h"
+#include "freertos/idf_additions.h"
 #include "freertos/task.h"
 #include "jpeg_decoder.h"
 
@@ -31,6 +32,7 @@
 
 #define WIFI_CONNECTED_BIT BIT0
 #define WIFI_FAIL_BIT BIT1
+#define RANDOM_HTTP_READ_BUF_SIZE 4096
 
 #define SD_APP_DIR SD_MOUNT_POINT "/szpi"
 #define SD_CONFIG_DIR SD_APP_DIR "/config"
@@ -77,6 +79,16 @@ static char s_wifi_password[65] = CONFIG_RANDOM_IMAGE_WIFI_PASSWORD;
 static char s_api_url[256] = CONFIG_RANDOM_IMAGE_API_URL;
 
 static void random_image_start_refresh(void);
+
+static void log_random_heap(const char *stage)
+{
+    ESP_LOGI(TAG, "%s heap: dram_free=%u dram_largest=%u psram_free=%u psram_largest=%u",
+             stage,
+             (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL),
+             (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL),
+             (unsigned)heap_caps_get_free_size(MALLOC_CAP_SPIRAM),
+             (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_SPIRAM));
+}
 
 static void trim_ascii(char *text)
 {
@@ -474,6 +486,7 @@ static esp_err_t http_get_to_buffer(const char *url, size_t max_len, const char 
     out->total_timeout_ms = total_timeout_ms;
     out->start_us = esp_timer_get_time();
     out->progress_prefix = progress_prefix;
+    uint8_t *read_buf = NULL;
 
     esp_http_client_config_t config = {
         .url = url,
@@ -486,6 +499,7 @@ static esp_err_t http_get_to_buffer(const char *url, size_t max_len, const char 
         .addr_type = HTTP_ADDR_TYPE_INET,
     };
 
+    log_random_heap("before http init");
     esp_http_client_handle_t client = esp_http_client_init(&config);
     if (client == NULL) {
         return ESP_ERR_NO_MEM;
@@ -514,7 +528,12 @@ static esp_err_t http_get_to_buffer(const char *url, size_t max_len, const char 
         goto cleanup;
     }
 
-    uint8_t read_buf[4096];
+    read_buf = heap_caps_malloc(RANDOM_HTTP_READ_BUF_SIZE, MALLOC_CAP_8BIT | MALLOC_CAP_SPIRAM);
+    if (read_buf == NULL) {
+        ret = ESP_ERR_NO_MEM;
+        goto cleanup;
+    }
+
     while (true) {
         int64_t now_us = esp_timer_get_time();
         if (total_timeout_ms > 0 && now_us - out->start_us > (int64_t)total_timeout_ms * 1000) {
@@ -522,7 +541,7 @@ static esp_err_t http_get_to_buffer(const char *url, size_t max_len, const char 
             goto cleanup;
         }
 
-        int read_len = esp_http_client_read(client, (char *)read_buf, sizeof(read_buf));
+        int read_len = esp_http_client_read(client, (char *)read_buf, RANDOM_HTTP_READ_BUF_SIZE);
         if (read_len < 0) {
             if (read_len == -ESP_ERR_HTTP_EAGAIN) {
                 vTaskDelay(pdMS_TO_TICKS(50));
@@ -557,8 +576,10 @@ static esp_err_t http_get_to_buffer(const char *url, size_t max_len, const char 
     }
 
 cleanup:
+    heap_caps_free(read_buf);
     esp_http_client_close(client);
     esp_http_client_cleanup(client);
+    log_random_heap("after http cleanup");
     if (ret != ESP_OK) {
         heap_caps_free(out->data);
         memset(out, 0, sizeof(*out));
@@ -607,6 +628,7 @@ static uint16_t *center_crop_canvas(const uint16_t *pixels, int width, int heigh
 
 static esp_err_t decode_jpeg_to_lvgl(const http_buffer_t *jpeg)
 {
+    log_random_heap("before jpeg decode");
     esp_jpeg_image_cfg_t info_cfg = {
         .indata = jpeg->data,
         .indata_size = jpeg->len,
@@ -644,6 +666,7 @@ static esp_err_t decode_jpeg_to_lvgl(const http_buffer_t *jpeg)
     }
 
     heap_caps_free(decoded);
+    log_random_heap("after jpeg decode");
     return ret;
 }
 
@@ -724,7 +747,11 @@ static void random_image_start_refresh(void)
     }
 
     s_fetching = true;
-    BaseType_t ok = xTaskCreatePinnedToCore(random_fetch_task, "random_image", 12288, NULL, 4, NULL, 1);
+    BaseType_t ok = xTaskCreatePinnedToCoreWithCaps(random_fetch_task, "random_image", 12288, NULL, 4,
+                                                    NULL, 1, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (ok != pdPASS) {
+        ok = xTaskCreatePinnedToCore(random_fetch_task, "random_image", 12288, NULL, 4, NULL, 1);
+    }
     if (ok != pdPASS) {
         s_fetching = false;
         ESP_LOGE(TAG, "create random_image task failed");
@@ -768,7 +795,12 @@ static void ensure_button_task(void)
         return;
     }
 
-    if (xTaskCreatePinnedToCore(random_button_task, "random_key", 4096, NULL, 5, NULL, 0) == pdPASS) {
+    BaseType_t ok = xTaskCreatePinnedToCoreWithCaps(random_button_task, "random_key", 4096, NULL, 5,
+                                                    NULL, 0, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (ok != pdPASS) {
+        ok = xTaskCreatePinnedToCore(random_button_task, "random_key", 4096, NULL, 5, NULL, 0);
+    }
+    if (ok == pdPASS) {
         s_button_task_started = true;
     }
 }

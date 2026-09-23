@@ -10,6 +10,9 @@ image when the random image app is active.
 
 The random image app downloads a JPEG body, decodes it with `esp_jpeg`, renders
 through a PSRAM canvas, and caches the last image under TF card storage.
+HTTPS uses certificate validation with mbedTLS transient allocations moved to
+PSRAM. The refresh task and HTTP read buffer are also PSRAM-friendly so repeated
+refreshes do not exhaust internal DRAM after the first successful image.
 
 Touch behavior:
 
