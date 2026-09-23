@@ -15,6 +15,7 @@ firmware work; some need external hardware because of ESP32-S3 limits.
 - Incremental media index updates instead of full-card rescans.
 - On-demand JPEG thumbnails for the media library.
 - Richer media library filters: photos, recordings, music, videos, documents.
+- IP camera preview from a configurable JPEG or MJPEG URL over WLAN.
 - Better lifecycle guards when quickly switching camera, audio, WLAN, and BLE
   pages.
 
@@ -24,8 +25,13 @@ firmware work; some need external hardware because of ESP32-S3 limits.
   realistic target. For Bluetooth speaker/microphone features, use BLE Audio
   experiments where supported or add an external Classic Bluetooth audio module
   connected by I2S/UART.
-- USB cameras are possible only within USB full-speed and driver limits. Tiny
-  MJPEG or low-resolution streams are more realistic than high-frame-rate UVC.
+- USB camera means a physical UVC camera attached to the ESP32-S3 USB Host/OTG
+  port. It is possible only within USB full-speed and driver limits. Tiny MJPEG
+  or low-resolution streams are more realistic than high-frame-rate UVC.
+- IP camera means a camera already on the WLAN, usually exposing HTTP JPEG,
+  MJPEG, or RTSP. HTTP JPEG/MJPEG is the best first target for this handheld:
+  the existing WiFi, HTTPS, JPEG decode, and LVGL display path are already close
+  to what it needs.
 - Video playback should start with very small MJPEG-like clips or image
   sequences. MP4/H.264 decode is outside a comfortable ESP32-S3 software-only
   budget.

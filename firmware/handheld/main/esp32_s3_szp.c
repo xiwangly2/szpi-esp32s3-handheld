@@ -1435,6 +1435,23 @@ esp_err_t bsp_codec_set_fs(uint32_t rate, uint32_t bits_cfg, i2s_slot_mode_t ch)
     return ret;
 }
 
+esp_err_t bsp_speaker_set_fs(uint32_t rate, uint32_t bits_cfg, i2s_slot_mode_t ch)
+{
+    esp_err_t ret = ESP_OK;
+
+    esp_codec_dev_sample_info_t fs = {
+        .sample_rate = rate,
+        .channel = ch,
+        .bits_per_sample = bits_cfg,
+    };
+
+    if (play_dev_handle) {
+        ret = esp_codec_dev_close(play_dev_handle);
+        ret |= esp_codec_dev_open(play_dev_handle, &fs);
+    }
+    return ret;
+}
+
 // 音频芯片初始化
 esp_err_t bsp_codec_init(void)
 {

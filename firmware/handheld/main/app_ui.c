@@ -37,6 +37,9 @@ lv_obj_t * main_text_label; // 主界面 欢迎语
 lv_obj_t * icon_in_obj; // 应用界面
 int icon_flag; // 标记现在进入哪个应用 在主界面时为0
 
+static void sdcard_clear_music_return(void);
+static bool sdcard_restore_from_music(void);
+
 /******************************** 第1个图标 姿态传感器 应用程序*************************************************************************************/
 lv_obj_t * label_x; // x角度值
 lv_obj_t * label_y; // y角度值
@@ -294,10 +297,20 @@ static file_iterator_instance_t *file_iterator = NULL;
 static bool g_audio_player_ready;
 static bool g_audio_list_mode = true;
 
+typedef enum {
+    MUSIC_PLAY_MODE_STOP = 0,
+    MUSIC_PLAY_MODE_SEQUENCE,
+    MUSIC_PLAY_MODE_LIST_LOOP,
+    MUSIC_PLAY_MODE_SINGLE_LOOP,
+} music_play_mode_t;
+
+static music_play_mode_t g_music_play_mode = MUSIC_PLAY_MODE_LIST_LOOP;
+
 lv_obj_t *music_list;
 lv_obj_t *label_play_pause;
 lv_obj_t *btn_play_pause;
 lv_obj_t *volume_slider;
+lv_obj_t *label_play_mode;
 
 lv_obj_t *music_title_label;
 lv_obj_t *btn_music_back;
@@ -437,6 +450,73 @@ static bool music_has_tracks(void)
     return file_iterator != NULL && file_iterator->count > 0;
 }
 
+static const char *music_play_mode_text(music_play_mode_t mode)
+{
+    switch (mode) {
+    case MUSIC_PLAY_MODE_STOP:
+        return "停止";
+    case MUSIC_PLAY_MODE_SEQUENCE:
+        return "顺序";
+    case MUSIC_PLAY_MODE_SINGLE_LOOP:
+        return "单曲";
+    case MUSIC_PLAY_MODE_LIST_LOOP:
+    default:
+        return "列表";
+    }
+}
+
+static void music_update_mode_label(void)
+{
+    if (label_play_mode != NULL) {
+        lv_label_set_text(label_play_mode, music_play_mode_text(g_music_play_mode));
+    }
+}
+
+static void music_show_stopped(void)
+{
+    if (btn_play_pause != NULL) {
+        lv_obj_clear_state(btn_play_pause, LV_STATE_CHECKED);
+    }
+    if (label_play_pause != NULL) {
+        lv_label_set_text_static(label_play_pause, LV_SYMBOL_PLAY);
+    }
+}
+
+static void music_play_mode_cb(lv_event_t *event)
+{
+    if (lv_event_get_code(event) != LV_EVENT_CLICKED) {
+        return;
+    }
+
+    g_music_play_mode = (music_play_mode_t)((g_music_play_mode + 1) % 4);
+    music_update_mode_label();
+    ESP_LOGI(TAG, "music play mode: %s", music_play_mode_text(g_music_play_mode));
+}
+
+static void music_clear_ui_refs(void)
+{
+    music_list = NULL;
+    label_play_pause = NULL;
+    btn_play_pause = NULL;
+    volume_slider = NULL;
+    label_play_mode = NULL;
+    music_title_label = NULL;
+    btn_music_back = NULL;
+}
+
+static void music_player_release(void)
+{
+    if (g_audio_player_ready) {
+        audio_player_stop();
+        audio_player_delete();
+        g_audio_player_ready = false;
+    }
+    music_iterator_free(file_iterator);
+    file_iterator = NULL;
+    g_audio_list_mode = true;
+    g_music_play_mode = MUSIC_PLAY_MODE_LIST_LOOP;
+}
+
 // 播放指定序号的音乐
 static void play_index(int index)
 {
@@ -448,7 +528,7 @@ static void play_index(int index)
     ESP_LOGI(TAG, "play_index(%d)", index);
     g_audio_list_mode = true;
 
-    char filename[128];
+    char filename[512];
     int retval = file_iterator_get_full_path_from_index(file_iterator, index, filename, sizeof(filename));
     if (retval == 0) {
         ESP_LOGE(TAG, "unable to retrieve filename");
@@ -494,7 +574,7 @@ static esp_err_t _audio_player_std_clock(uint32_t rate, uint32_t bits_cfg, i2s_s
 {
     esp_err_t ret = ESP_OK;
 
-    // ret = bsp_codec_set_fs(rate, bits_cfg, ch); // 如果播放的音乐固定是16000采样率 这里可以不用打开 如果采样率未知 把这里打开
+    ret = bsp_speaker_set_fs(rate, bits_cfg, ch);
     return ret;
 }
 
@@ -505,18 +585,50 @@ static void _audio_player_callback(audio_player_cb_ctx_t *ctx)
     switch (ctx->audio_event) {
     case AUDIO_PLAYER_CALLBACK_EVENT_IDLE: {  // 播放完一首歌 进入这个case
         ESP_LOGI(TAG, "AUDIO_PLAYER_REQUEST_IDLE");
-        if (!g_audio_list_mode || file_iterator == NULL) {
+        if (!g_audio_list_mode || file_iterator == NULL || file_iterator->count == 0) {
             pa_en(0);
+            lvgl_port_lock(0);
+            music_show_stopped();
+            lvgl_port_unlock();
             break;
         }
-        // 指向下一首歌
-        file_iterator_next(file_iterator);
+
         int index = file_iterator_get_index(file_iterator);
+        if (g_music_play_mode == MUSIC_PLAY_MODE_STOP) {
+            pa_en(0);
+            lvgl_port_lock(0);
+            music_show_stopped();
+            lvgl_port_unlock();
+            break;
+        }
+        if (g_music_play_mode == MUSIC_PLAY_MODE_SINGLE_LOOP) {
+            ESP_LOGI(TAG, "single loop index '%d'", index);
+            play_index(index);
+            break;
+        }
+
+        if (g_music_play_mode == MUSIC_PLAY_MODE_SEQUENCE) {
+            if ((size_t)index + 1 >= file_iterator->count) {
+                pa_en(0);
+                lvgl_port_lock(0);
+                music_show_stopped();
+                lvgl_port_unlock();
+                break;
+            }
+            index++;
+            file_iterator_set_index(file_iterator, index);
+        } else {
+            file_iterator_next(file_iterator);
+            index = file_iterator_get_index(file_iterator);
+        }
+
         ESP_LOGI(TAG, "playing index '%d'", index);
         play_index(index);
         // 修改当前播放的音乐名称
         lvgl_port_lock(0);
-        lv_dropdown_set_selected(music_list, index);
+        if (music_list != NULL) {
+            lv_dropdown_set_selected(music_list, index);
+        }
         lvgl_port_unlock();
         break;
     }
@@ -557,6 +669,7 @@ void mp3_player_init(void)
     ESP_ERROR_CHECK(audio_player_callback_register(_audio_player_callback, NULL));
     g_audio_player_ready = true;
     g_audio_list_mode = true;
+    g_music_play_mode = MUSIC_PLAY_MODE_LIST_LOOP;
 }
 
 
@@ -806,10 +919,24 @@ void music_ui(void)
     lv_dropdown_clear_options(music_list);
     lv_dropdown_set_options_static(music_list, "Scanning...");
     music_dropdown_apply_font(music_list);
-    lv_obj_set_width(music_list, 200);
-    lv_obj_align(music_list, LV_ALIGN_TOP_MID, 0, 60);
+    lv_obj_set_width(music_list, 198);
+    lv_obj_align(music_list, LV_ALIGN_TOP_LEFT, 10, 60);
     lv_obj_add_event_cb(music_list, music_dropdown_style_cb, LV_EVENT_ALL, NULL);
     lv_obj_add_event_cb(music_list, music_list_cb, LV_EVENT_VALUE_CHANGED, NULL);
+
+    lv_obj_t *btn_mode = lv_btn_create(icon_in_obj);
+    lv_obj_set_size(btn_mode, 82, 36);
+    lv_obj_align(btn_mode, LV_ALIGN_TOP_RIGHT, -10, 58);
+    lv_obj_set_style_radius(btn_mode, 8, 0);
+    lv_obj_set_style_border_width(btn_mode, 0, 0);
+    lv_obj_set_style_shadow_opa(btn_mode, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_bg_color(btn_mode, lv_color_hex(0xf87c30), 0);
+    lv_obj_add_event_cb(btn_mode, music_play_mode_cb, LV_EVENT_CLICKED, NULL);
+    label_play_mode = lv_label_create(btn_mode);
+    lv_obj_set_style_text_font(label_play_mode, &font_alipuhui20, 0);
+    lv_obj_set_style_text_color(label_play_mode, lv_color_hex(0xffffff), 0);
+    music_update_mode_label();
+    lv_obj_center(label_play_mode);
 
     build_file_list(music_list);
 
@@ -819,31 +946,34 @@ void music_ui(void)
 // 返回主界面按钮事件处理函数
 static void btn_music_back_cb(lv_event_t * e)
 {
-    lv_obj_del(icon_in_obj); 
-    if (g_audio_player_ready) {
-        audio_player_delete();
-        g_audio_player_ready = false;
+    if (icon_in_obj != NULL) {
+        lv_obj_del(icon_in_obj);
+        icon_in_obj = NULL;
     }
-    music_iterator_free(file_iterator);
-    file_iterator = NULL;
+    music_clear_ui_refs();
+    music_player_release();
+    if (sdcard_restore_from_music()) {
+        return;
+    }
     icon_flag = 0;
 }
 
-// 进入音乐播放应用
-static void music_event_handler(lv_event_t * e)
+static void music_create_page(const char *title)
 {
-    // 初始化mp3播放器
-    mp3_player_init();
     // 创建一个界面对象
     static lv_style_t style;
-    lv_style_init(&style);
-    lv_style_set_radius(&style, 10);  
-    lv_style_set_bg_opa( &style, LV_OPA_COVER );
-    lv_style_set_bg_color(&style, lv_color_hex(0xffffff));
-    lv_style_set_border_width(&style, 0);
-    lv_style_set_pad_all(&style, 0);
-    lv_style_set_width(&style, 320);  
-    lv_style_set_height(&style, 240); 
+    static bool style_ready;
+    if (!style_ready) {
+        lv_style_init(&style);
+        lv_style_set_radius(&style, 10);
+        lv_style_set_bg_opa(&style, LV_OPA_COVER);
+        lv_style_set_bg_color(&style, lv_color_hex(0xffffff));
+        lv_style_set_border_width(&style, 0);
+        lv_style_set_pad_all(&style, 0);
+        lv_style_set_width(&style, 320);
+        lv_style_set_height(&style, 240);
+        style_ready = true;
+    }
 
     icon_in_obj = lv_obj_create(lv_scr_act());
     lv_obj_add_style(icon_in_obj, &style, 0);
@@ -856,7 +986,7 @@ static void music_event_handler(lv_event_t * e)
     lv_obj_set_style_bg_color(music_title, lv_color_hex(0xf87c30), 0);
     // 显示标题
     music_title_label = lv_label_create(music_title);
-    lv_label_set_text(music_title_label, "音乐播放器");
+    lv_label_set_text(music_title_label, title);
     lv_obj_set_style_text_color(music_title_label, lv_color_hex(0xffffff), 0); 
     lv_obj_set_style_text_font(music_title_label, &font_alipuhui20, 0);
     lv_obj_align(music_title_label, LV_ALIGN_CENTER, 0, 0);
@@ -881,6 +1011,65 @@ static void music_event_handler(lv_event_t * e)
     music_ui(); // 音乐播放器界面
 }
 
+// 进入音乐播放应用
+static void music_event_handler(lv_event_t * e)
+{
+    if (icon_flag != 0) {
+        return;
+    }
+
+    sdcard_clear_music_return();
+    mp3_player_init();
+    g_music_play_mode = MUSIC_PLAY_MODE_SEQUENCE;
+    music_create_page("音乐播放器");
+}
+
+static bool music_prepare_from_path(const char *path, size_t *selected_index)
+{
+    const char *slash = strrchr(path, '/');
+    if (slash == NULL || slash[1] == '\0') {
+        return false;
+    }
+
+    char dir_path[512];
+    size_t dir_len = (size_t)(slash - path);
+    if (dir_len == 0 || dir_len >= sizeof(dir_path)) {
+        return false;
+    }
+    memcpy(dir_path, path, dir_len);
+    dir_path[dir_len] = '\0';
+
+    file_iterator_instance_t *iter = music_iterator_new_from_dir(dir_path);
+    if (iter == NULL) {
+        return false;
+    }
+
+    const char *file_name = slash + 1;
+    size_t found = 0;
+    bool matched = false;
+    for (size_t i = 0; i < iter->count; i++) {
+        const char *name = file_iterator_get_name_from_index(iter, i);
+        if (name != NULL && strcmp(name, file_name) == 0) {
+            found = i;
+            matched = true;
+            break;
+        }
+    }
+
+    if (!matched) {
+        music_iterator_free(iter);
+        return false;
+    }
+
+    music_player_release();
+    file_iterator = iter;
+    file_iterator_set_index(file_iterator, found);
+    if (selected_index != NULL) {
+        *selected_index = found;
+    }
+    return true;
+}
+
 
 /******************************** 第3个图标 SD卡 应用程序***************************************************************************/
 lv_obj_t * sdcard_title; // SD卡页面标题背景
@@ -893,6 +1082,7 @@ static lv_obj_t *s_sdmgr_info_label;
 #define SDCARD_PREVIEW_TOP 40
 #define SDCARD_PREVIEW_W BSP_LCD_H_RES
 #define SDCARD_PREVIEW_H (BSP_LCD_V_RES - SDCARD_PREVIEW_TOP)
+#define SDCARD_PREVIEW_FULL_H BSP_LCD_V_RES
 #define SDCARD_TEXT_PREVIEW_LIMIT 4096
 #define SDCARD_IMAGE_PREVIEW_LIMIT (2 * 1024 * 1024)
 #define SDCARD_PNG_PREVIEW_LIMIT (768 * 1024)
@@ -908,6 +1098,8 @@ struct file_path_info
     char path_back[512]; // 上级文件路径
 };
 struct file_path_info file_path_info;
+static struct file_path_info s_music_return_path;
+static bool s_music_return_to_sdcard;
 
 typedef enum {
     SD_FILE_OTHER = 0,
@@ -921,6 +1113,10 @@ typedef enum {
 
 static uint8_t *s_preview_img_buf;
 static lv_img_dsc_t s_preview_img_dsc;
+static lv_obj_t *s_preview_bar;
+static lv_obj_t *s_preview_body;
+static lv_obj_t *s_preview_media_obj;
+static bool s_preview_fullscreen;
 static bool s_lv_fs_ready;
 static volatile uint32_t s_sd_preview_generation;
 static bsp_sdcard_format_t s_sd_format_target = BSP_SDCARD_FORMAT_AUTO;
@@ -938,7 +1134,20 @@ typedef struct {
 // 函数声明
 esp_err_t list_sdcard_files(char * path);
 static void file_list_btn_cb(lv_event_t * e); 
+static void btn_sdback_cb(lv_event_t * e);
 static void sd_preview_message(const char *title, const char *message);
+
+static void sdcard_clear_music_return(void)
+{
+    s_music_return_to_sdcard = false;
+    memset(&s_music_return_path, 0, sizeof(s_music_return_path));
+}
+
+static void sdcard_remember_music_return(void)
+{
+    s_music_return_path = file_path_info;
+    s_music_return_to_sdcard = true;
+}
 
 static const char *sd_format_name(bsp_sdcard_format_t format)
 {
@@ -1121,27 +1330,43 @@ static void sd_lv_fs_init_once(void)
     s_lv_fs_ready = true;
 }
 
-static bool sd_audio_player_ready(void)
+static void sd_preview_set_fullscreen(bool fullscreen)
 {
-    if (g_audio_player_ready) {
-        return true;
+    if (sdcard_preview_page == NULL || s_preview_bar == NULL || s_preview_body == NULL) {
+        return;
     }
 
-    player_config.mute_fn = _audio_player_mute_fn;
-    player_config.write_fn = _audio_player_write_fn;
-    player_config.clk_set_fn = _audio_player_std_clock;
-    player_config.priority = 6;
-    player_config.coreID = 1;
+    s_preview_fullscreen = fullscreen;
+    if (fullscreen) {
+        lv_obj_add_flag(s_preview_bar, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_set_size(s_preview_body, SDCARD_PREVIEW_W, SDCARD_PREVIEW_FULL_H);
+        lv_obj_align(s_preview_body, LV_ALIGN_TOP_LEFT, 0, 0);
+    } else {
+        lv_obj_clear_flag(s_preview_bar, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_set_size(s_preview_body, SDCARD_PREVIEW_W, SDCARD_PREVIEW_H);
+        lv_obj_align(s_preview_body, LV_ALIGN_BOTTOM_LEFT, 0, 0);
+    }
+    if (s_preview_media_obj != NULL) {
+        lv_obj_center(s_preview_media_obj);
+    }
+}
 
-    if (audio_player_new(player_config) != ESP_OK) {
-        return false;
+static void sd_preview_toggle_fullscreen_cb(lv_event_t *e)
+{
+    if (lv_event_get_code(e) == LV_EVENT_CLICKED) {
+        sd_preview_set_fullscreen(!s_preview_fullscreen);
     }
-    if (audio_player_callback_register(_audio_player_callback, NULL) != ESP_OK) {
-        audio_player_delete();
-        return false;
+}
+
+static void sd_preview_enable_fullscreen_toggle(lv_obj_t *body, lv_obj_t *media)
+{
+    s_preview_media_obj = media;
+    lv_obj_add_flag(body, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_add_event_cb(body, sd_preview_toggle_fullscreen_cb, LV_EVENT_CLICKED, NULL);
+    if (media != NULL) {
+        lv_obj_add_flag(media, LV_OBJ_FLAG_CLICKABLE);
+        lv_obj_add_event_cb(media, sd_preview_toggle_fullscreen_cb, LV_EVENT_CLICKED, NULL);
     }
-    g_audio_player_ready = true;
-    return true;
 }
 
 static void sd_preview_clear_current(void)
@@ -1153,6 +1378,10 @@ static void sd_preview_clear_current(void)
         lv_obj_del(sdcard_preview_page);
         sdcard_preview_page = NULL;
     }
+    s_preview_bar = NULL;
+    s_preview_body = NULL;
+    s_preview_media_obj = NULL;
+    s_preview_fullscreen = false;
     if (s_preview_img_buf != NULL) {
         heap_caps_free(s_preview_img_buf);
         s_preview_img_buf = NULL;
@@ -1188,6 +1417,7 @@ static lv_obj_t *sd_preview_create_page(const char *title)
     lv_obj_set_style_border_width(bar, 0, 0);
     lv_obj_set_style_radius(bar, 0, 0);
     lv_obj_set_style_bg_color(bar, lv_color_hex(0x008b8b), 0);
+    s_preview_bar = bar;
 
     lv_obj_t *back = lv_btn_create(bar);
     lv_obj_set_size(back, 56, 34);
@@ -1217,6 +1447,9 @@ static lv_obj_t *sd_preview_create_page(const char *title)
     lv_obj_set_style_border_width(body, 0, 0);
     lv_obj_set_style_radius(body, 0, 0);
     lv_obj_set_style_bg_color(body, lv_color_hex(0x101820), 0);
+    s_preview_body = body;
+    s_preview_media_obj = NULL;
+    s_preview_fullscreen = false;
     return body;
 }
 
@@ -1290,6 +1523,7 @@ static void sd_preview_png(const char *path)
     lv_obj_t *img = lv_img_create(body);
     lv_img_set_src(img, lv_path);
     lv_obj_center(img);
+    sd_preview_enable_fullscreen_toggle(body, img);
     lvgl_port_unlock();
 }
 
@@ -1305,6 +1539,7 @@ static void sd_preview_gif(const char *path)
     lv_obj_t *gif = lv_gif_create(body);
     lv_gif_set_src(gif, lv_path);
     lv_obj_center(gif);
+    sd_preview_enable_fullscreen_toggle(body, gif);
     lvgl_port_unlock();
 }
 
@@ -1322,25 +1557,25 @@ static esp_jpeg_image_scale_t sd_choose_jpeg_scale(int width, int height)
     return JPEG_IMAGE_SCALE_0;
 }
 
-static uint16_t *sd_center_crop_canvas(const uint16_t *pixels, int width, int height)
+static uint16_t *sd_center_crop_canvas(const uint16_t *pixels, int width, int height, int target_w, int target_h)
 {
-    uint16_t *canvas = heap_caps_malloc(SDCARD_PREVIEW_W * SDCARD_PREVIEW_H * sizeof(uint16_t),
+    uint16_t *canvas = heap_caps_malloc(target_w * target_h * sizeof(uint16_t),
                                         MALLOC_CAP_8BIT | MALLOC_CAP_SPIRAM);
     if (canvas == NULL) {
         return NULL;
     }
 
-    memset(canvas, 0, SDCARD_PREVIEW_W * SDCARD_PREVIEW_H * sizeof(uint16_t));
-    int src_x = width > SDCARD_PREVIEW_W ? (width - SDCARD_PREVIEW_W) / 2 : 0;
-    int src_y = height > SDCARD_PREVIEW_H ? (height - SDCARD_PREVIEW_H) / 2 : 0;
-    int copy_w = width > SDCARD_PREVIEW_W ? SDCARD_PREVIEW_W : width;
-    int copy_h = height > SDCARD_PREVIEW_H ? SDCARD_PREVIEW_H : height;
-    int dst_x = width < SDCARD_PREVIEW_W ? (SDCARD_PREVIEW_W - width) / 2 : 0;
-    int dst_y = height < SDCARD_PREVIEW_H ? (SDCARD_PREVIEW_H - height) / 2 : 0;
+    memset(canvas, 0, target_w * target_h * sizeof(uint16_t));
+    int src_x = width > target_w ? (width - target_w) / 2 : 0;
+    int src_y = height > target_h ? (height - target_h) / 2 : 0;
+    int copy_w = width > target_w ? target_w : width;
+    int copy_h = height > target_h ? target_h : height;
+    int dst_x = width < target_w ? (target_w - width) / 2 : 0;
+    int dst_y = height < target_h ? (target_h - height) / 2 : 0;
 
     for (int y = 0; y < copy_h; y++) {
         const uint16_t *src = pixels + (src_y + y) * width + src_x;
-        uint16_t *dst = canvas + (dst_y + y) * SDCARD_PREVIEW_W + dst_x;
+        uint16_t *dst = canvas + (dst_y + y) * target_w + dst_x;
         memcpy(dst, src, copy_w * sizeof(uint16_t));
     }
     return canvas;
@@ -1419,7 +1654,8 @@ static void sd_preview_jpeg_task(void *arg)
                 jpeg_cfg.outbuf_size = outimg.output_len;
                 ret = esp_jpeg_decode(&jpeg_cfg, &outimg);
                 if (ret == ESP_OK) {
-                    uint16_t *canvas = sd_center_crop_canvas(decoded, outimg.width, outimg.height);
+                    uint16_t *canvas = sd_center_crop_canvas(decoded, outimg.width, outimg.height,
+                                                             SDCARD_PREVIEW_W, SDCARD_PREVIEW_FULL_H);
                     if (canvas == NULL) {
                         ret = ESP_ERR_NO_MEM;
                     } else {
@@ -1431,12 +1667,13 @@ static void sd_preview_jpeg_task(void *arg)
                             s_preview_img_dsc.header.always_zero = 0;
                             s_preview_img_dsc.header.reserved = 0;
                             s_preview_img_dsc.header.w = SDCARD_PREVIEW_W;
-                            s_preview_img_dsc.header.h = SDCARD_PREVIEW_H;
-                            s_preview_img_dsc.data_size = SDCARD_PREVIEW_W * SDCARD_PREVIEW_H * sizeof(uint16_t);
+                            s_preview_img_dsc.header.h = SDCARD_PREVIEW_FULL_H;
+                            s_preview_img_dsc.data_size = SDCARD_PREVIEW_W * SDCARD_PREVIEW_FULL_H * sizeof(uint16_t);
                             s_preview_img_dsc.data = s_preview_img_buf;
                             lv_obj_t *img = lv_img_create(body);
                             lv_img_set_src(img, &s_preview_img_dsc);
                             lv_obj_center(img);
+                            sd_preview_enable_fullscreen_toggle(body, img);
                             lvgl_port_unlock();
                         } else {
                             heap_caps_free(canvas);
@@ -1470,49 +1707,53 @@ static void sd_preview_jpeg(const char *path, uint32_t generation)
     }
 }
 
-static void sd_preview_audio(const char *path)
+static bool music_open_from_sd_path(const char *path)
 {
-    if (!sd_audio_player_ready()) {
-        sd_preview_message("音频播放", "播放器初始化失败");
-        return;
+    size_t selected = 0;
+    if (!music_prepare_from_path(path, &selected)) {
+        return false;
     }
 
-    FILE *fp = fopen(path, "rb");
-    if (fp == NULL) {
-        sd_preview_message("音频播放", "文件打开失败");
-        return;
+    mp3_player_init();
+    if (!g_audio_player_ready) {
+        music_player_release();
+        return false;
     }
 
-    g_audio_list_mode = false;
-    esp_err_t ret = audio_player_play(fp);
-    if (ret != ESP_OK) {
-        fclose(fp);
-        sd_preview_message("音频播放", "播放失败");
-        return;
+    sdcard_remember_music_return();
+    sd_preview_cleanup();
+    if (icon_in_obj != NULL) {
+        lv_obj_del(icon_in_obj);
+        icon_in_obj = NULL;
     }
+    sdcard_title = NULL;
+    sdcard_label = NULL;
+    sdcard_file_list = NULL;
 
+    g_music_play_mode = MUSIC_PLAY_MODE_STOP;
+    music_create_page("音乐播放器");
     lvgl_port_lock(0);
-    lv_obj_t *body = sd_preview_create_page("音频播放");
-    lv_obj_t *symbol = lv_label_create(body);
-    lv_label_set_text(symbol, LV_SYMBOL_AUDIO);
-    lv_obj_set_style_text_font(symbol, &lv_font_montserrat_24, 0);
-    lv_obj_set_style_text_color(symbol, lv_color_hex(0xffffff), 0);
-    lv_obj_align(symbol, LV_ALIGN_CENTER, 0, -36);
-
-    lv_obj_t *label = lv_label_create(body);
-    lv_label_set_text(label, "正在播放\n返回会停止");
-    lv_obj_set_style_text_font(label, &font_alipuhui20, 0);
-    lv_obj_set_style_text_align(label, LV_TEXT_ALIGN_CENTER, 0);
-    lv_obj_set_style_text_color(label, lv_color_hex(0xffffff), 0);
-    lv_obj_align(label, LV_ALIGN_CENTER, 0, 18);
+    if (music_list != NULL) {
+        lv_dropdown_set_selected(music_list, selected);
+    }
+    if (btn_play_pause != NULL) {
+        lv_obj_add_state(btn_play_pause, LV_STATE_CHECKED);
+    }
+    if (label_play_pause != NULL) {
+        lv_label_set_text_static(label_play_pause, LV_SYMBOL_PAUSE);
+    }
     lvgl_port_unlock();
+    play_index((int)selected);
+    return true;
 }
 
 static void sd_preview_file(const char *path, sd_file_type_t type, off_t file_size)
 {
     switch (type) {
     case SD_FILE_AUDIO:
-        sd_preview_audio(path);
+        if (!music_open_from_sd_path(path)) {
+            sd_preview_message("音频播放", "播放器初始化失败");
+        }
         break;
     case SD_FILE_IMAGE_JPEG:
         if (file_size <= 0 || file_size > (off_t)SDCARD_IMAGE_PREVIEW_LIMIT) {
@@ -1803,6 +2044,92 @@ static void btn_sdback_cb(lv_event_t * e)
             ESP_LOGI(TAG, "path_back: %s", file_path_info.path_back);
         }
     }
+}
+
+static void sdcard_create_page_shell(const char *title_text)
+{
+    static lv_style_t style;
+    static bool style_ready;
+    if (!style_ready) {
+        lv_style_init(&style);
+        lv_style_set_radius(&style, 10);
+        lv_style_set_bg_opa(&style, LV_OPA_COVER);
+        lv_style_set_bg_color(&style, lv_color_hex(0xffffff));
+        lv_style_set_border_width(&style, 0);
+        lv_style_set_pad_all(&style, 0);
+        lv_style_set_width(&style, 320);
+        lv_style_set_height(&style, 240);
+        style_ready = true;
+    }
+
+    icon_in_obj = lv_obj_create(lv_scr_act());
+    lv_obj_add_style(icon_in_obj, &style, 0);
+
+    sdcard_title = lv_obj_create(icon_in_obj);
+    lv_obj_set_size(sdcard_title, 320, 40);
+    lv_obj_set_style_pad_all(sdcard_title, 0, 0);
+    lv_obj_align(sdcard_title, LV_ALIGN_TOP_LEFT, 0, 0);
+    lv_obj_set_style_bg_color(sdcard_title, lv_color_hex(0x008b8b), 0);
+
+    sdcard_label = lv_label_create(sdcard_title);
+    lv_label_set_text(sdcard_label, title_text);
+    lv_obj_set_style_text_color(sdcard_label, lv_color_hex(0xffffff), 0);
+    lv_obj_set_style_text_font(sdcard_label, &font_alipuhui20, 0);
+    lv_obj_align(sdcard_label, LV_ALIGN_CENTER, 0, 0);
+
+    icon_flag = 3;
+}
+
+static void sdcard_create_nav_and_list(void)
+{
+    lv_obj_t *btn_back = lv_btn_create(sdcard_title);
+    lv_obj_align(btn_back, LV_ALIGN_LEFT_MID, 0, 0);
+    lv_obj_set_size(btn_back, 60, 30);
+    lv_obj_set_style_border_width(btn_back, 0, 0);
+    lv_obj_set_style_pad_all(btn_back, 0, 0);
+    lv_obj_set_style_bg_opa(btn_back, LV_OPA_TRANSP, LV_PART_MAIN);
+    lv_obj_set_style_shadow_opa(btn_back, LV_OPA_TRANSP, LV_PART_MAIN);
+    lv_obj_add_event_cb(btn_back, btn_sdback_cb, LV_EVENT_CLICKED, NULL);
+
+    lv_obj_t *label_back = lv_label_create(btn_back);
+    lv_label_set_text(label_back, LV_SYMBOL_LEFT);
+    lv_obj_set_style_text_font(label_back, &lv_font_montserrat_20, 0);
+    lv_obj_set_style_text_color(label_back, lv_color_hex(0xffffff), 0);
+    lv_obj_align(label_back, LV_ALIGN_CENTER, -10, 0);
+
+    sdcard_file_list = lv_list_create(icon_in_obj);
+    lv_obj_set_size(sdcard_file_list, 320, 200);
+    lv_obj_align(sdcard_file_list, LV_ALIGN_TOP_LEFT, 0, 40);
+    lv_obj_set_style_border_width(sdcard_file_list, 0, 0);
+    lv_obj_set_style_text_font(sdcard_file_list, &font_alipuhui20, 0);
+    lv_obj_set_scrollbar_mode(sdcard_file_list, LV_SCROLLBAR_MODE_OFF);
+}
+
+static bool sdcard_restore_from_music(void)
+{
+    if (!s_music_return_to_sdcard) {
+        return false;
+    }
+
+    struct file_path_info saved = s_music_return_path;
+    sdcard_clear_music_return();
+
+    if (bsp_sdcard_mount() != ESP_OK) {
+        icon_flag = 0;
+        return false;
+    }
+
+    file_path_info = saved;
+    sdcard_create_page_shell("TF卡");
+    if (sdmmc_card != NULL) {
+        lv_label_set_text_fmt(sdcard_label, "SD: %lluGB",
+            (((uint64_t)sdmmc_card->csd.capacity) * sdmmc_card->csd.sector_size) >> 30);
+    }
+    sdcard_create_nav_and_list();
+    if (list_sdcard_files(file_path_info.path_now) != ESP_OK) {
+        lv_label_set_text(sdcard_label, "目录读取失败");
+    }
+    return true;
 }
 
 // 列出SD卡中的文件
@@ -3674,7 +4001,7 @@ static void btset_event_handler(lv_event_t * e)
 #define RECORDER_SAMPLE_RATE       16000
 #define RECORDER_CHANNELS          1
 #define RECORDER_BITS_PER_SAMPLE   16
-#define RECORDER_SRC_CHANNELS      ADC_I2S_CHANNEL
+#define RECORDER_SRC_CHANNELS      CODEC_DEFAULT_CHANNEL
 #define RECORDER_FRAMES_PER_CHUNK  512
 #define RECORDER_ICON_FLAG         8
 
@@ -3798,6 +4125,14 @@ static void recorder_task(void *arg)
     if (g_audio_player_ready) {
         audio_player_stop();
     }
+
+    ret = bsp_codec_set_fs(RECORDER_SAMPLE_RATE, RECORDER_BITS_PER_SAMPLE, CODEC_DEFAULT_CHANNEL);
+    if (ret != ESP_OK) {
+        ESP_LOGW(TAG, "recorder set fs failed: %s", esp_err_to_name(ret));
+    }
+    ESP_LOGI(TAG, "recorder fs=%dHz bits=%d src_ch=%d out_ch=%d",
+             RECORDER_SAMPLE_RATE, RECORDER_BITS_PER_SAMPLE,
+             RECORDER_SRC_CHANNELS, RECORDER_CHANNELS);
 
     ret = bsp_sdcard_mount();
     if (ret != ESP_OK) {

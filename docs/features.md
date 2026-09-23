@@ -63,6 +63,17 @@ Music scanning checks:
 - `/sdcard/music`
 - `/sdcard`
 
+Music playback modes:
+
+- `停止`: play the current track and stop when it ends
+- `顺序`: automatically advance until the end of the list, then stop
+- `列表`: loop through the whole list
+- `单曲`: repeat the current track
+
+Opening music from the home launcher defaults to `顺序`. Opening an audio file
+from the TF card file manager defaults to `停止` and returns to the same folder
+when leaving the player.
+
 The recorder stores 16 kHz mono WAV files at:
 
 ```text
