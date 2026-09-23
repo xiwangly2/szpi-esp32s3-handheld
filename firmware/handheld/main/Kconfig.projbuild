@@ -1,0 +1,54 @@
+menu "Random Image LVGL App"
+
+    config RANDOM_IMAGE_WIFI_SSID
+        string "WiFi SSID"
+        default ""
+        help
+            2.4GHz WiFi SSID used by the random image app.
+
+    config RANDOM_IMAGE_WIFI_PASSWORD
+        string "WiFi password"
+        default ""
+        help
+            Password for the configured WiFi network. Leave empty for an open network.
+
+    config RANDOM_IMAGE_API_URL
+        string "Random image JPEG URL"
+        default "https://example.com/image.php?key=change-me&return=print&esp=1"
+        help
+            Endpoint returning a JPEG image body.
+
+    config RANDOM_IMAGE_REFRESH_GPIO
+        int "User refresh key GPIO"
+        default 0
+        help
+            GPIO pulled low by the board user key. The SZPI ESP32-S3 user key is GPIO0.
+
+    config RANDOM_IMAGE_MAX_JPEG_KB
+        int "Maximum downloaded JPEG size in KB"
+        default 768
+        help
+            Download limit used to skip very large random images.
+
+    config RANDOM_IMAGE_HTTP_TIMEOUT_MS
+        int "HTTP socket timeout in ms"
+        range 3000 60000
+        default 12000
+        help
+            Per-socket timeout for HTTPS requests.
+
+    config RANDOM_IMAGE_IMAGE_TIMEOUT_MS
+        int "Total image download timeout in ms"
+        range 10000 180000
+        default 20000
+        help
+            Total timeout for one random JPEG download before retrying.
+
+    config RANDOM_IMAGE_FETCH_RETRIES
+        int "Image fetch attempts per refresh"
+        range 1 10
+        default 3
+        help
+            Number of random images to try before showing an error.
+
+endmenu

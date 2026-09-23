@@ -1,0 +1,18 @@
+* text=auto eol=lf
+*.bat text eol=crlf
+*.cmd text eol=crlf
+*.ps1 text eol=crlf
+
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.webp binary
+*.mp3 binary
+*.wav binary
+*.pcm binary
+*.bin binary
+*.zip binary
+
+firmware/handheld/main/assets/font_alipuhui20.c linguist-generated=true -diff
+firmware/handheld/components/fatfs/** linguist-vendored=true

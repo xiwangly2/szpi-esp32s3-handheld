@@ -1,0 +1,3 @@
+ssid=YOUR_2G_SSID
+password=YOUR_WIFI_PASSWORD
+api_url=https://example.com/image.php?key=change-me&return=print&esp=1

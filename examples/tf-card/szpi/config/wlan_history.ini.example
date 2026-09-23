@@ -1,0 +1,4 @@
+[network]
+ssid=YOUR_2G_SSID
+password=YOUR_WIFI_PASSWORD
+auth=3

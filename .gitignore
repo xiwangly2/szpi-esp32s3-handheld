@@ -1,0 +1,34 @@
+# ESP-IDF build outputs
+**/build/
+**/build_*/
+**/managed_components/
+**/sdkconfig
+**/sdkconfig.old
+**/sdkconfig.defaults.local
+**/compile_commands.json
+**/*.elf
+**/*.map
+**/*.bin
+
+# Local editor and machine state
+.idea/
+.vscode/settings.json
+*.log
+
+# Local secrets and deployed media
+.env
+backend/image-api/config.php
+backend/image-api/images/
+backend/image-api/bz/
+backend/image-api/background/
+
+# Runtime TF-card data copied back from devices
+examples/tf-card/szpi/cache/
+examples/tf-card/szpi/photos/
+examples/tf-card/szpi/music/
+examples/tf-card/music/
+
+# Release assets are better uploaded to GitHub/Gitea releases.
+dist/
+release/
+releases/

@@ -1,0 +1,71 @@
+{
+  "version": "2.0.0",
+  "inputs": [
+    {
+      "id": "serialPort",
+      "type": "promptString",
+      "description": "ESP32-S3 serial port",
+      "default": "COM7"
+    }
+  ],
+  "tasks": [
+    {
+      "label": "ESP-IDF: Build handheld",
+      "type": "shell",
+      "command": "${workspaceFolder}/tools/powershell/idf.ps1",
+      "args": [
+        "build"
+      ],
+      "problemMatcher": []
+    },
+    {
+      "label": "ESP-IDF: Flash handheld",
+      "type": "shell",
+      "command": "${workspaceFolder}/tools/powershell/idf.ps1",
+      "args": [
+        "-Port",
+        "${input:serialPort}",
+        "flash"
+      ],
+      "problemMatcher": []
+    },
+    {
+      "label": "ESP-IDF: Monitor handheld",
+      "type": "shell",
+      "command": "${workspaceFolder}/tools/powershell/idf.ps1",
+      "args": [
+        "-Port",
+        "${input:serialPort}",
+        "monitor"
+      ],
+      "problemMatcher": []
+    },
+    {
+      "label": "ESP-IDF: Flash and monitor handheld",
+      "type": "shell",
+      "command": "${workspaceFolder}/tools/powershell/idf.ps1",
+      "args": [
+        "-Port",
+        "${input:serialPort}",
+        "flash",
+        "monitor"
+      ],
+      "problemMatcher": []
+    },
+    {
+      "label": "ESP-IDF: Merge release binary",
+      "type": "shell",
+      "command": "${workspaceFolder}/tools/powershell/idf.ps1",
+      "args": [
+        "merge-bin"
+      ],
+      "problemMatcher": []
+    },
+    {
+      "label": "Project: Doctor",
+      "type": "shell",
+      "command": "${workspaceFolder}/tools/powershell/doctor.ps1",
+      "problemMatcher": []
+    }
+  ]
+}
