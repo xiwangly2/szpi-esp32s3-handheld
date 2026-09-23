@@ -3396,6 +3396,9 @@ LV_IMG_DECLARE(img_wifiset_icon);
 LV_IMG_DECLARE(img_btset_icon);
 
 #define HOME_ITEMS_PER_PAGE 4
+#define HOME_SWIPE_THRESHOLD 36
+#define HOME_SWIPE_AXIS_MARGIN 10
+#define HOME_SWIPE_CLICK_SUPPRESS_MS 450
 
 typedef enum {
     HOME_ICON_SYMBOL,
@@ -3417,6 +3420,11 @@ static uint8_t s_home_page_index;
 static bool s_home_styles_ready;
 static bool s_home_launch_locked;
 static bool s_home_button_task_started;
+static bool s_home_press_tracking;
+static bool s_home_swipe_consumed;
+static bool s_home_swipe_suppress_click;
+static lv_point_t s_home_press_point;
+static lv_timer_t *s_home_swipe_clear_timer;
 static lv_style_t s_home_bg_style;
 static lv_style_t s_home_button_style;
 static lv_style_t s_home_button_pressed_style;
@@ -3470,6 +3478,29 @@ static void home_styles_init(void)
 
 static void home_render_page(void);
 
+static void home_clear_swipe_suppress_cb(lv_timer_t *timer)
+{
+    s_home_swipe_suppress_click = false;
+    s_home_swipe_clear_timer = NULL;
+    lv_timer_del(timer);
+}
+
+static void home_defer_clear_swipe_suppress(void)
+{
+    if (s_home_swipe_clear_timer != NULL) {
+        lv_timer_reset(s_home_swipe_clear_timer);
+        return;
+    }
+
+    s_home_swipe_clear_timer = lv_timer_create(home_clear_swipe_suppress_cb,
+                                               HOME_SWIPE_CLICK_SUPPRESS_MS, NULL);
+    if (s_home_swipe_clear_timer != NULL) {
+        lv_timer_set_repeat_count(s_home_swipe_clear_timer, 1);
+    } else {
+        s_home_swipe_suppress_click = false;
+    }
+}
+
 static void home_unlock_launch_cb(lv_timer_t *timer)
 {
     s_home_launch_locked = false;
@@ -3481,7 +3512,7 @@ static void home_app_clicked_cb(lv_event_t *e)
     if (lv_event_get_code(e) != LV_EVENT_CLICKED) {
         return;
     }
-    if (s_home_launch_locked || icon_flag != 0) {
+    if (s_home_launch_locked || s_home_swipe_suppress_click || icon_flag != 0) {
         return;
     }
 
@@ -3514,6 +3545,16 @@ static void home_switch_page(int delta)
 
     s_home_page_index = (uint8_t)next;
     home_render_page();
+}
+
+static void home_switch_page_async_cb(void *arg)
+{
+    home_switch_page((int)(intptr_t)arg);
+}
+
+static void home_request_page_switch(int delta)
+{
+    lv_async_call(home_switch_page_async_cb, (void *)(intptr_t)delta);
 }
 
 static void home_button_next_page_cb(void *arg)
@@ -3582,9 +3623,58 @@ static void home_gesture_cb(lv_event_t *e)
 
     lv_dir_t dir = lv_indev_get_gesture_dir(indev);
     if (dir == LV_DIR_LEFT) {
-        home_switch_page(1);
+        s_home_swipe_suppress_click = true;
+        home_request_page_switch(1);
+        home_defer_clear_swipe_suppress();
     } else if (dir == LV_DIR_RIGHT) {
-        home_switch_page(-1);
+        s_home_swipe_suppress_click = true;
+        home_request_page_switch(-1);
+        home_defer_clear_swipe_suppress();
+    }
+}
+
+static void home_pointer_cb(lv_event_t *e)
+{
+    lv_event_code_t code = lv_event_get_code(e);
+    lv_indev_t *indev = lv_indev_get_act();
+    if (indev == NULL) {
+        return;
+    }
+
+    if (code == LV_EVENT_PRESSED) {
+        if (icon_flag != 0) {
+            return;
+        }
+        lv_indev_get_point(indev, &s_home_press_point);
+        s_home_press_tracking = true;
+        s_home_swipe_consumed = false;
+        return;
+    }
+
+    if (code == LV_EVENT_PRESSING) {
+        if (!s_home_press_tracking || s_home_swipe_consumed || icon_flag != 0) {
+            return;
+        }
+
+        lv_point_t point;
+        lv_indev_get_point(indev, &point);
+        int dx = point.x - s_home_press_point.x;
+        int dy = point.y - s_home_press_point.y;
+        int abs_dx = abs(dx);
+        int abs_dy = abs(dy);
+        if (abs_dx >= HOME_SWIPE_THRESHOLD && abs_dx > abs_dy + HOME_SWIPE_AXIS_MARGIN) {
+            s_home_swipe_consumed = true;
+            s_home_press_tracking = false;
+            s_home_swipe_suppress_click = true;
+            home_request_page_switch(dx < 0 ? 1 : -1);
+            home_defer_clear_swipe_suppress();
+        }
+        return;
+    }
+
+    if (code == LV_EVENT_RELEASED || code == LV_EVENT_PRESS_LOST) {
+        s_home_press_tracking = false;
+        s_home_swipe_consumed = false;
     }
 }
 
@@ -3603,6 +3693,10 @@ static void home_create_icon(const home_app_item_t *app, uint8_t slot)
     lv_obj_set_pos(btn, x_pos[col], y_pos[row] - 45);
     lv_obj_clear_flag(btn, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_add_flag(btn, LV_OBJ_FLAG_GESTURE_BUBBLE);
+    lv_obj_add_event_cb(btn, home_pointer_cb, LV_EVENT_PRESSED, NULL);
+    lv_obj_add_event_cb(btn, home_pointer_cb, LV_EVENT_PRESSING, NULL);
+    lv_obj_add_event_cb(btn, home_pointer_cb, LV_EVENT_RELEASED, NULL);
+    lv_obj_add_event_cb(btn, home_pointer_cb, LV_EVENT_PRESS_LOST, NULL);
     lv_obj_add_event_cb(btn, home_app_clicked_cb, LV_EVENT_CLICKED, (void *)app);
     lv_obj_add_event_cb(btn, home_gesture_cb, LV_EVENT_GESTURE, NULL);
 
@@ -3668,6 +3762,11 @@ void lv_main_page(void)
     main_obj = lv_obj_create(lv_scr_act());
     lv_obj_add_style(main_obj, &s_home_bg_style, 0);
     lv_obj_clear_flag(main_obj, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_add_flag(main_obj, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_add_event_cb(main_obj, home_pointer_cb, LV_EVENT_PRESSED, NULL);
+    lv_obj_add_event_cb(main_obj, home_pointer_cb, LV_EVENT_PRESSING, NULL);
+    lv_obj_add_event_cb(main_obj, home_pointer_cb, LV_EVENT_RELEASED, NULL);
+    lv_obj_add_event_cb(main_obj, home_pointer_cb, LV_EVENT_PRESS_LOST, NULL);
     lv_obj_add_event_cb(main_obj, home_gesture_cb, LV_EVENT_GESTURE, NULL);
 
     lv_obj_t *top_line = lv_obj_create(main_obj);
@@ -3702,6 +3801,11 @@ void lv_main_page(void)
     lv_obj_set_style_radius(s_home_icon_layer, 0, 0);
     lv_obj_set_style_bg_opa(s_home_icon_layer, LV_OPA_TRANSP, 0);
     lv_obj_clear_flag(s_home_icon_layer, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_add_flag(s_home_icon_layer, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_add_event_cb(s_home_icon_layer, home_pointer_cb, LV_EVENT_PRESSED, NULL);
+    lv_obj_add_event_cb(s_home_icon_layer, home_pointer_cb, LV_EVENT_PRESSING, NULL);
+    lv_obj_add_event_cb(s_home_icon_layer, home_pointer_cb, LV_EVENT_RELEASED, NULL);
+    lv_obj_add_event_cb(s_home_icon_layer, home_pointer_cb, LV_EVENT_PRESS_LOST, NULL);
     lv_obj_add_event_cb(s_home_icon_layer, home_gesture_cb, LV_EVENT_GESTURE, NULL);
 
     s_home_page_label = lv_label_create(main_obj);
