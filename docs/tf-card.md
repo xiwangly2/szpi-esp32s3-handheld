@@ -104,9 +104,14 @@ lightweight tab-separated index to:
 
 The current index stores file type, byte size, and absolute TF path. It is meant
 as the base for richer media browsing, thumbnails, and incremental background
-updates. The first implementation deliberately avoids decoding thumbnails during
-the scan so it does not compete heavily with camera preview, random-image JPEG
-decode, or audio playback.
+updates. The media library can browse the index with `all`, image, audio, and
+text filters. Selecting an indexed item reuses the normal file preview path:
+images, GIFs, and text open in the previewer, while audio opens the full music
+player and returns to the media library when leaving playback.
+
+The scanner deliberately avoids decoding thumbnails during the scan so it does
+not compete heavily with camera preview, random-image JPEG decode, or audio
+playback.
 
 Multi-partition cards are currently detected and displayed, but the device UI
 does not yet switch between multiple mounted volumes. The firmware still mounts

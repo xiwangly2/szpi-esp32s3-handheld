@@ -39,6 +39,7 @@ int icon_flag; // 标记现在进入哪个应用 在主界面时为0
 
 static void sdcard_clear_music_return(void);
 static bool sdcard_restore_from_music(void);
+static bool media_restore_from_music(void);
 
 /******************************** 第1个图标 姿态传感器 应用程序*************************************************************************************/
 lv_obj_t * label_x; // x角度值
@@ -955,6 +956,9 @@ static void btn_music_back_cb(lv_event_t * e)
     if (sdcard_restore_from_music()) {
         return;
     }
+    if (media_restore_from_music()) {
+        return;
+    }
     icon_flag = 0;
 }
 
@@ -1707,7 +1711,7 @@ static void sd_preview_jpeg(const char *path, uint32_t generation)
     }
 }
 
-static bool music_open_from_sd_path(const char *path)
+static bool music_open_from_path(const char *path, bool return_to_sdcard)
 {
     size_t selected = 0;
     if (!music_prepare_from_path(path, &selected)) {
@@ -1720,7 +1724,9 @@ static bool music_open_from_sd_path(const char *path)
         return false;
     }
 
-    sdcard_remember_music_return();
+    if (return_to_sdcard) {
+        sdcard_remember_music_return();
+    }
     sd_preview_cleanup();
     if (icon_in_obj != NULL) {
         lv_obj_del(icon_in_obj);
@@ -1751,7 +1757,7 @@ static void sd_preview_file(const char *path, sd_file_type_t type, off_t file_si
 {
     switch (type) {
     case SD_FILE_AUDIO:
-        if (!music_open_from_sd_path(path)) {
+        if (!music_open_from_path(path, true)) {
             sd_preview_message("音频播放", "播放器初始化失败");
         }
         break;
@@ -4352,6 +4358,14 @@ static void recorder_event_handler(lv_event_t *e)
 #define MEDIA_INDEX_PATH SD_MOUNT_POINT "/szpi/cache/media_index.tsv"
 #define MEDIA_SCAN_MAX_FILES 1200
 #define MEDIA_SCAN_MAX_DEPTH 8
+#define MEDIA_LIST_MAX_ITEMS 80
+
+typedef enum {
+    MEDIA_FILTER_ALL = 0,
+    MEDIA_FILTER_IMAGE,
+    MEDIA_FILTER_AUDIO,
+    MEDIA_FILTER_TEXT,
+} media_filter_t;
 
 typedef struct {
     uint32_t files;
@@ -4374,11 +4388,22 @@ typedef struct {
     media_index_stats_t stats;
 } media_scan_ctx_t;
 
+typedef struct {
+    char path[512];
+    sd_file_type_t type;
+    uint64_t bytes;
+} media_list_item_t;
+
 static lv_obj_t *s_media_status_label;
 static lv_obj_t *s_media_info_label;
+static lv_obj_t *s_media_list;
 static TaskHandle_t s_media_scan_task_handle;
 static volatile bool s_media_page_active;
 static media_index_stats_t s_media_last_stats;
+static media_filter_t s_media_filter = MEDIA_FILTER_ALL;
+static media_list_item_t *s_media_items[MEDIA_LIST_MAX_ITEMS];
+static size_t s_media_item_count;
+static bool s_music_return_to_media;
 
 static const char *media_type_name(sd_file_type_t type)
 {
@@ -4397,6 +4422,96 @@ static const char *media_type_name(sd_file_type_t type)
     default:
         return "other";
     }
+}
+
+static const char *media_filter_name(media_filter_t filter)
+{
+    switch (filter) {
+    case MEDIA_FILTER_IMAGE:
+        return "图片";
+    case MEDIA_FILTER_AUDIO:
+        return "音频";
+    case MEDIA_FILTER_TEXT:
+        return "文本";
+    case MEDIA_FILTER_ALL:
+    default:
+        return "全部";
+    }
+}
+
+static bool media_type_matches_filter(sd_file_type_t type, media_filter_t filter)
+{
+    switch (filter) {
+    case MEDIA_FILTER_IMAGE:
+        return type == SD_FILE_IMAGE_JPEG || type == SD_FILE_IMAGE_PNG || type == SD_FILE_IMAGE_GIF;
+    case MEDIA_FILTER_AUDIO:
+        return type == SD_FILE_AUDIO;
+    case MEDIA_FILTER_TEXT:
+        return type == SD_FILE_TEXT;
+    case MEDIA_FILTER_ALL:
+    default:
+        return type != SD_FILE_OTHER;
+    }
+}
+
+static sd_file_type_t media_type_from_index_row(const char *type_text, const char *path)
+{
+    if (type_text == NULL) {
+        return SD_FILE_OTHER;
+    }
+    if (strcmp(type_text, "audio") == 0) {
+        return SD_FILE_AUDIO;
+    }
+    if (strcmp(type_text, "video") == 0) {
+        return SD_FILE_VIDEO;
+    }
+    if (strcmp(type_text, "text") == 0) {
+        return SD_FILE_TEXT;
+    }
+    if (strcmp(type_text, "image") == 0) {
+        return sd_classify_file(path);
+    }
+    return SD_FILE_OTHER;
+}
+
+static const char *media_item_symbol(sd_file_type_t type)
+{
+    switch (type) {
+    case SD_FILE_AUDIO:
+        return LV_SYMBOL_AUDIO;
+    case SD_FILE_VIDEO:
+        return LV_SYMBOL_PLAY;
+    case SD_FILE_IMAGE_JPEG:
+    case SD_FILE_IMAGE_PNG:
+    case SD_FILE_IMAGE_GIF:
+        return LV_SYMBOL_IMAGE;
+    case SD_FILE_TEXT:
+    default:
+        return LV_SYMBOL_FILE;
+    }
+}
+
+static const char *media_basename(const char *path)
+{
+    const char *slash = path != NULL ? strrchr(path, '/') : NULL;
+    return slash != NULL && slash[1] != '\0' ? slash + 1 : path;
+}
+
+static void media_forget_list_items(void)
+{
+    for (size_t i = 0; i < s_media_item_count; i++) {
+        free(s_media_items[i]);
+        s_media_items[i] = NULL;
+    }
+    s_media_item_count = 0;
+}
+
+static void media_clear_list_locked(void)
+{
+    if (s_media_list != NULL) {
+        lv_obj_clean(s_media_list);
+    }
+    media_forget_list_items();
 }
 
 static void media_stats_add_file(media_index_stats_t *stats, sd_file_type_t type, uint64_t bytes)
@@ -4554,6 +4669,151 @@ static void media_update_ui(const char *status, const media_index_stats_t *stats
     lvgl_port_unlock();
 }
 
+static void media_detach_page_refs(void)
+{
+    s_media_status_label = NULL;
+    s_media_info_label = NULL;
+    s_media_list = NULL;
+}
+
+static void media_item_cb(lv_event_t *e)
+{
+    if (lv_event_get_code(e) != LV_EVENT_CLICKED) {
+        return;
+    }
+
+    media_list_item_t *item = (media_list_item_t *)lv_event_get_user_data(e);
+    if (item == NULL) {
+        return;
+    }
+
+    char path[sizeof(item->path)];
+    strlcpy(path, item->path, sizeof(path));
+    sd_file_type_t type = item->type;
+    off_t bytes = (off_t)item->bytes;
+
+    if (type == SD_FILE_AUDIO) {
+        s_music_return_to_media = true;
+        if (music_open_from_path(path, false)) {
+            s_media_page_active = false;
+            media_forget_list_items();
+            media_detach_page_refs();
+            return;
+        }
+        s_music_return_to_media = false;
+        sd_preview_message("音频播放", "播放器初始化失败");
+        return;
+    }
+
+    struct stat st;
+    if (stat(path, &st) == 0 && S_ISREG(st.st_mode)) {
+        bytes = st.st_size;
+    }
+    sd_preview_file(path, type, bytes);
+}
+
+static void media_populate_list(media_filter_t filter)
+{
+    FILE *f = fopen(MEDIA_INDEX_PATH, "r");
+    bool have_index = f != NULL;
+    media_list_item_t *items[MEDIA_LIST_MAX_ITEMS] = {0};
+    size_t count = 0;
+    bool truncated = false;
+
+    if (have_index) {
+        char line[768];
+        if (fgets(line, sizeof(line), f) == NULL) {
+            line[0] = '\0';
+        }
+
+        while (fgets(line, sizeof(line), f) != NULL) {
+            char *type_text = line;
+            char *size_text = strchr(type_text, '\t');
+            if (size_text == NULL) {
+                continue;
+            }
+            *size_text++ = '\0';
+            char *path = strchr(size_text, '\t');
+            if (path == NULL) {
+                continue;
+            }
+            *path++ = '\0';
+            path[strcspn(path, "\r\n")] = '\0';
+            if (path[0] == '\0') {
+                continue;
+            }
+
+            sd_file_type_t type = media_type_from_index_row(type_text, path);
+            if (!media_type_matches_filter(type, filter)) {
+                continue;
+            }
+
+            if (count >= MEDIA_LIST_MAX_ITEMS) {
+                truncated = true;
+                break;
+            }
+
+            media_list_item_t *item = calloc(1, sizeof(*item));
+            if (item == NULL) {
+                truncated = true;
+                break;
+            }
+            strlcpy(item->path, path, sizeof(item->path));
+            item->type = type;
+            item->bytes = strtoull(size_text, NULL, 10);
+            items[count++] = item;
+        }
+        fclose(f);
+    }
+
+    lvgl_port_lock(0);
+    if (!s_media_page_active || s_media_list == NULL) {
+        lvgl_port_unlock();
+        for (size_t i = 0; i < count; i++) {
+            free(items[i]);
+        }
+        return;
+    }
+
+    media_clear_list_locked();
+    if (!have_index) {
+        lv_obj_t *btn = lv_list_add_btn(s_media_list, LV_SYMBOL_FILE, "先扫描索引");
+        lv_obj_set_style_text_font(btn, &font_alipuhui20, 0);
+        if (s_media_status_label != NULL) {
+            lv_label_set_text(s_media_status_label, "没有索引文件");
+        }
+        lvgl_port_unlock();
+        return;
+    }
+
+    if (count == 0) {
+        lv_obj_t *btn = lv_list_add_btn(s_media_list, LV_SYMBOL_FILE, "暂无项目");
+        lv_obj_set_style_text_font(btn, &font_alipuhui20, 0);
+    }
+
+    for (size_t i = 0; i < count; i++) {
+        media_list_item_t *item = items[i];
+        const char *name = media_basename(item->path);
+        lv_obj_t *btn = lv_list_add_btn(s_media_list, media_item_symbol(item->type), name);
+        lv_obj_set_style_text_font(btn, &font_alipuhui20, 0);
+        lv_obj_add_event_cb(btn, media_item_cb, LV_EVENT_CLICKED, item);
+        s_media_items[s_media_item_count++] = item;
+        items[i] = NULL;
+    }
+
+    if (s_media_status_label != NULL) {
+        lv_label_set_text_fmt(s_media_status_label, "%s: %u%s",
+                              media_filter_name(filter),
+                              (unsigned)s_media_item_count,
+                              truncated ? "+" : "");
+    }
+    lvgl_port_unlock();
+
+    for (size_t i = 0; i < count; i++) {
+        free(items[i]);
+    }
+}
+
 static void media_scan_task(void *arg)
 {
     (void)arg;
@@ -4580,6 +4840,7 @@ static void media_scan_task(void *arg)
 
     s_media_last_stats = ctx.stats;
     media_update_ui(ctx.stats.limit_reached ? "索引完成(已截断)" : "索引完成", &ctx.stats);
+    media_populate_list(s_media_filter);
     s_media_scan_task_handle = NULL;
     vTaskDelete(NULL);
 }
@@ -4613,6 +4874,16 @@ static void media_scan_cb(lv_event_t *e)
     }
 }
 
+static void media_filter_cb(lv_event_t *e)
+{
+    if (lv_event_get_code(e) != LV_EVENT_CLICKED) {
+        return;
+    }
+
+    s_media_filter = (media_filter_t)(intptr_t)lv_event_get_user_data(e);
+    media_populate_list(s_media_filter);
+}
+
 static void media_back_cb(lv_event_t *e)
 {
     if (lv_event_get_code(e) != LV_EVENT_CLICKED) {
@@ -4620,8 +4891,9 @@ static void media_back_cb(lv_event_t *e)
     }
 
     s_media_page_active = false;
-    s_media_status_label = NULL;
-    s_media_info_label = NULL;
+    s_music_return_to_media = false;
+    media_forget_list_items();
+    media_detach_page_refs();
     if (icon_in_obj != NULL) {
         lv_obj_del(icon_in_obj);
         icon_in_obj = NULL;
@@ -4630,7 +4902,7 @@ static void media_back_cb(lv_event_t *e)
 }
 
 static lv_obj_t *media_create_button(lv_obj_t *parent, const char *text, int x, int w,
-                                     lv_color_t color, lv_event_cb_t cb)
+                                     lv_color_t color, lv_event_cb_t cb, void *user_data)
 {
     lv_obj_t *btn = lv_btn_create(parent);
     lv_obj_set_size(btn, w, 34);
@@ -4639,7 +4911,7 @@ static lv_obj_t *media_create_button(lv_obj_t *parent, const char *text, int x, 
     lv_obj_set_style_border_width(btn, 0, 0);
     lv_obj_set_style_shadow_opa(btn, LV_OPA_TRANSP, 0);
     lv_obj_set_style_bg_color(btn, color, 0);
-    lv_obj_add_event_cb(btn, cb, LV_EVENT_CLICKED, NULL);
+    lv_obj_add_event_cb(btn, cb, LV_EVENT_CLICKED, user_data);
 
     lv_obj_t *label = lv_label_create(btn);
     lv_label_set_text(label, text);
@@ -4649,18 +4921,21 @@ static lv_obj_t *media_create_button(lv_obj_t *parent, const char *text, int x, 
     return btn;
 }
 
-static void media_event_handler(lv_event_t *e)
+static void media_create_page(bool auto_scan)
 {
-    (void)e;
     static lv_style_t style;
-    lv_style_init(&style);
-    lv_style_set_radius(&style, 0);
-    lv_style_set_bg_opa(&style, LV_OPA_COVER);
-    lv_style_set_bg_color(&style, lv_color_hex(0x111827));
-    lv_style_set_border_width(&style, 0);
-    lv_style_set_pad_all(&style, 0);
-    lv_style_set_width(&style, 320);
-    lv_style_set_height(&style, 240);
+    static bool style_ready;
+    if (!style_ready) {
+        lv_style_init(&style);
+        lv_style_set_radius(&style, 0);
+        lv_style_set_bg_opa(&style, LV_OPA_COVER);
+        lv_style_set_bg_color(&style, lv_color_hex(0x111827));
+        lv_style_set_border_width(&style, 0);
+        lv_style_set_pad_all(&style, 0);
+        lv_style_set_width(&style, 320);
+        lv_style_set_height(&style, 240);
+        style_ready = true;
+    }
 
     icon_in_obj = lv_obj_create(lv_scr_act());
     lv_obj_add_style(icon_in_obj, &style, 0);
@@ -4697,11 +4972,11 @@ static void media_event_handler(lv_event_t *e)
     lv_label_set_text(s_media_status_label, "Ready");
     lv_obj_set_style_text_font(s_media_status_label, &font_alipuhui20, 0);
     lv_obj_set_style_text_color(s_media_status_label, lv_color_hex(0xe8eef9), 0);
-    lv_obj_align(s_media_status_label, LV_ALIGN_TOP_LEFT, 12, 48);
+    lv_obj_align(s_media_status_label, LV_ALIGN_TOP_LEFT, 12, 44);
 
     lv_obj_t *panel = lv_obj_create(icon_in_obj);
-    lv_obj_set_size(panel, 296, 132);
-    lv_obj_align(panel, LV_ALIGN_TOP_LEFT, 12, 76);
+    lv_obj_set_size(panel, 296, 56);
+    lv_obj_align(panel, LV_ALIGN_TOP_LEFT, 12, 66);
     lv_obj_set_style_radius(panel, 6, 0);
     lv_obj_set_style_border_width(panel, 0, 0);
     lv_obj_set_style_bg_color(panel, lv_color_hex(0x1f2937), 0);
@@ -4715,14 +4990,46 @@ static void media_event_handler(lv_event_t *e)
     lv_obj_set_style_text_color(s_media_info_label, lv_color_hex(0xffffff), 0);
     lv_label_set_text(s_media_info_label, "等待扫描...");
 
-    media_create_button(icon_in_obj, "SCAN", 106, 108, lv_color_hex(0x3662a3), media_scan_cb);
+    s_media_list = lv_list_create(icon_in_obj);
+    lv_obj_set_size(s_media_list, 296, 68);
+    lv_obj_align(s_media_list, LV_ALIGN_TOP_LEFT, 12, 126);
+    lv_obj_set_style_border_width(s_media_list, 0, 0);
+    lv_obj_set_style_radius(s_media_list, 6, 0);
+    lv_obj_set_style_text_font(s_media_list, &font_alipuhui20, 0);
+    lv_obj_set_scrollbar_mode(s_media_list, LV_SCROLLBAR_MODE_AUTO);
+
+    media_create_button(icon_in_obj, "全", 8, 56, lv_color_hex(0x3662a3), media_filter_cb, (void *)MEDIA_FILTER_ALL);
+    media_create_button(icon_in_obj, "图", 68, 56, lv_color_hex(0x2fa66a), media_filter_cb, (void *)MEDIA_FILTER_IMAGE);
+    media_create_button(icon_in_obj, "音", 128, 56, lv_color_hex(0x4c7bd9), media_filter_cb, (void *)MEDIA_FILTER_AUDIO);
+    media_create_button(icon_in_obj, "文", 188, 56, lv_color_hex(0xc08a34), media_filter_cb, (void *)MEDIA_FILTER_TEXT);
+    media_create_button(icon_in_obj, "扫", 248, 56, lv_color_hex(0x6d5bd0), media_scan_cb, NULL);
 
     s_media_page_active = true;
     icon_flag = MEDIA_LIBRARY_ICON_FLAG;
     if (s_media_last_stats.files > 0) {
         media_update_ui("上次索引", &s_media_last_stats);
     }
-    media_start_scan();
+    media_populate_list(s_media_filter);
+    if (auto_scan) {
+        media_start_scan();
+    }
+}
+
+static void media_event_handler(lv_event_t *e)
+{
+    (void)e;
+    media_create_page(true);
+}
+
+static bool media_restore_from_music(void)
+{
+    if (!s_music_return_to_media) {
+        return false;
+    }
+
+    s_music_return_to_media = false;
+    media_create_page(false);
+    return true;
 }
 
 

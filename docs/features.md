@@ -40,6 +40,11 @@ repeated refresh glitches on a small embedded display.
 The TF card file manager is kept focused on browsing and media previews. Disk
 operations live in the separate TF manager page.
 
+The media library builds `/szpi/cache/media_index.tsv` in the background and
+can browse that index by all media, images, audio, or text. Opening an indexed
+entry reuses the same preview and music-player paths as the TF card file
+manager.
+
 The TF manager page shows capacity, mounted filesystem, partition table type
 (`GPT`, `MBR`, or raw FAT), and the first few partition entries. It also has a
 guarded quick formatter for the currently mounted volume:
