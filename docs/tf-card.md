@@ -9,6 +9,7 @@ Recommended layout:
 /szpi/config/wlan_history.ini
 /szpi/cache/random/latest.jpg
 /szpi/photos/
+/szpi/recordings/
 /szpi/music/
 /music/
 ```
@@ -51,10 +52,35 @@ entry when the SSID is seen again.
 
 ## File Systems
 
-The project enables FatFs long file names, UTF-8 API encoding, codepage 936, and
-optional exFAT support. exFAT on a GPT TF card is the intended convenient setup
-for larger media cards. If a card cannot mount on a specific firmware build,
-try a single-partition MBR card as a compatibility fallback.
+The default firmware configuration enables:
+
+- FAT12/FAT16/FAT32 through FatFs
+- exFAT through `CONFIG_FATFS_EXFAT=y`
+- long file names allocated on heap
+- UTF-8 API paths with codepage 936
+- 4096-byte FatFs block reporting
+- FatFs buffers preferred in PSRAM where possible
+
+Recommended card format:
+
+- exFAT for larger media cards
+- one Microsoft Basic Data partition
+- GPT is supported by the bundled FatFs scanner and is the intended setup for
+  modern large TF cards
+
+Compatibility fallback:
+
+- FAT32 or exFAT
+- single partition
+- MBR partition table
+
+Not supported as TF-card filesystems: NTFS, APFS, ext4, HFS+, or multi-volume
+switching from the device UI.
+
+ESP-IDF leaves exFAT disabled by default because it is optional in FatFs. This
+project enables it by default for the handheld media use case. If you ship a
+commercial product, review the licensing and IP notes that apply to your
+distribution.
 
 For lots of Unicode text, store files as UTF-8 on TF. The expensive part is not
 the text file itself, but the display font. A product-quality build should use a

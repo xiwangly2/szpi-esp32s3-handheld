@@ -8,7 +8,7 @@
 - PSRAM: 8 MB octal PSRAM
 - Display: board LCD through the project BSP
 - Touch: FT5x06
-- Storage: TF card, FAT32 or exFAT
+- Storage: TF card, FAT32 or exFAT. exFAT is enabled by default in this project.
 
 ## Toolchain
 

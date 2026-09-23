@@ -23,11 +23,28 @@ Touch behavior:
 The file manager previews JPG, PNG, GIF, text, MP3, and WAV. Video files are
 currently detected as media but not played.
 
+Large previews are guarded before LVGL receives the file:
+
+- JPG: up to 2 MB, decoded in a worker task
+- PNG: up to 768 KB
+- GIF: up to 512 KB
+- text: only the first 4 KB is loaded into the text preview
+
+Files above those limits show a size message instead of being decoded
+automatically. This keeps large media from blocking the UI thread or causing
+repeated refresh glitches on a small embedded display.
+
 Music scanning checks:
 
 - `/sdcard/szpi/music`
 - `/sdcard/music`
 - `/sdcard`
+
+The recorder stores 16 kHz mono WAV files at:
+
+```text
+/sdcard/szpi/recordings/rec_<time>.wav
+```
 
 ## Camera
 

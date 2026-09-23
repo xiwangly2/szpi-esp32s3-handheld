@@ -19,6 +19,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <ctype.h>
+#include <stdint.h>
 #include <sys/stat.h>
 #include <time.h>
 #include <sys/time.h>
@@ -869,6 +870,9 @@ lv_obj_t * sdcard_preview_page; // 文件预览页面
 #define SDCARD_PREVIEW_H (BSP_LCD_V_RES - SDCARD_PREVIEW_TOP)
 #define SDCARD_TEXT_PREVIEW_LIMIT 4096
 #define SDCARD_IMAGE_PREVIEW_LIMIT (2 * 1024 * 1024)
+#define SDCARD_PNG_PREVIEW_LIMIT (768 * 1024)
+#define SDCARD_GIF_PREVIEW_LIMIT (512 * 1024)
+#define SDCARD_TEXT_PREVIEW_EXTRA 96
 
 extern sdmmc_card_t *sdmmc_card;
 
@@ -893,10 +897,17 @@ typedef enum {
 static uint8_t *s_preview_img_buf;
 static lv_img_dsc_t s_preview_img_dsc;
 static bool s_lv_fs_ready;
+static volatile uint32_t s_sd_preview_generation;
+
+typedef struct {
+    char path[512];
+    uint32_t generation;
+} sd_jpeg_preview_req_t;
 
 // 函数声明
 esp_err_t list_sdcard_files(char * path);
 static void file_list_btn_cb(lv_event_t * e); 
+static void sd_preview_message(const char *title, const char *message);
 
 static const char *sd_file_ext(const char *path)
 {
@@ -932,6 +943,37 @@ static sd_file_type_t sd_classify_file(const char *path)
         return SD_FILE_TEXT;
     }
     return SD_FILE_OTHER;
+}
+
+static void sd_format_file_size(char *out, size_t out_len, off_t size)
+{
+    if (size < 0) {
+        snprintf(out, out_len, "未知");
+        return;
+    }
+    if (size < 1024) {
+        snprintf(out, out_len, "%ld B", (long)size);
+        return;
+    }
+    if (size < 1024 * 1024) {
+        snprintf(out, out_len, "%.1f KB", (double)size / 1024.0);
+        return;
+    }
+    snprintf(out, out_len, "%.1f MB", (double)size / (1024.0 * 1024.0));
+}
+
+static void sd_preview_large_file(const char *title, off_t file_size, size_t limit)
+{
+    char file_size_text[24];
+    char limit_text[24];
+    char message[192];
+
+    sd_format_file_size(file_size_text, sizeof(file_size_text), file_size);
+    sd_format_file_size(limit_text, sizeof(limit_text), (off_t)limit);
+    snprintf(message, sizeof(message),
+             "文件较大，已跳过自动预览\n大小: %s\n安全上限: %s\n\n请压缩或裁切后再预览",
+             file_size_text, limit_text);
+    sd_preview_message(title, message);
 }
 
 static void *sd_lv_fs_open(lv_fs_drv_t *drv, const char *path, lv_fs_mode_t mode)
@@ -1020,7 +1062,7 @@ static bool sd_audio_player_ready(void)
     return true;
 }
 
-static void sd_preview_cleanup(void)
+static void sd_preview_clear_current(void)
 {
     if (g_audio_player_ready && !g_audio_list_mode) {
         audio_player_stop();
@@ -1035,6 +1077,12 @@ static void sd_preview_cleanup(void)
     }
 }
 
+static void sd_preview_cleanup(void)
+{
+    s_sd_preview_generation++;
+    sd_preview_clear_current();
+}
+
 static void sd_preview_back_cb(lv_event_t *e)
 {
     sd_preview_cleanup();
@@ -1042,7 +1090,7 @@ static void sd_preview_back_cb(lv_event_t *e)
 
 static lv_obj_t *sd_preview_create_page(const char *title)
 {
-    sd_preview_cleanup();
+    sd_preview_clear_current();
 
     sdcard_preview_page = lv_obj_create(lv_scr_act());
     lv_obj_set_size(sdcard_preview_page, 320, 240);
@@ -1096,14 +1144,16 @@ static void sd_preview_message(const char *title, const char *message)
     lv_obj_t *body = sd_preview_create_page(title);
     lv_obj_t *label = lv_label_create(body);
     lv_label_set_text(label, message);
+    lv_label_set_long_mode(label, LV_LABEL_LONG_WRAP);
     lv_obj_set_style_text_font(label, &font_alipuhui20, 0);
+    lv_obj_set_style_text_align(label, LV_TEXT_ALIGN_CENTER, 0);
     lv_obj_set_style_text_color(label, lv_color_hex(0xffffff), 0);
     lv_obj_set_width(label, 280);
     lv_obj_align(label, LV_ALIGN_CENTER, 0, 0);
     lvgl_port_unlock();
 }
 
-static void sd_preview_text(const char *path)
+static void sd_preview_text(const char *path, off_t file_size)
 {
     FILE *f = fopen(path, "rb");
     if (f == NULL) {
@@ -1111,7 +1161,8 @@ static void sd_preview_text(const char *path)
         return;
     }
 
-    char *buf = heap_caps_malloc(SDCARD_TEXT_PREVIEW_LIMIT + 32, MALLOC_CAP_8BIT | MALLOC_CAP_SPIRAM);
+    char *buf = heap_caps_malloc(SDCARD_TEXT_PREVIEW_LIMIT + SDCARD_TEXT_PREVIEW_EXTRA,
+                                 MALLOC_CAP_8BIT | MALLOC_CAP_SPIRAM);
     if (buf == NULL) {
         fclose(f);
         sd_preview_message("文本预览", "内存不足");
@@ -1122,9 +1173,9 @@ static void sd_preview_text(const char *path)
     bool truncated = !feof(f);
     fclose(f);
     buf[len] = '\0';
-    if (truncated) {
-        const char *suffix = "\n\n...";
-        memcpy(buf + len, suffix, strlen(suffix) + 1);
+    if (truncated || file_size > (off_t)SDCARD_TEXT_PREVIEW_LIMIT) {
+        snprintf(buf + len, SDCARD_TEXT_PREVIEW_EXTRA, "\n\n...仅显示前 %u KB",
+                 (unsigned)(SDCARD_TEXT_PREVIEW_LIMIT / 1024));
     }
 
     lvgl_port_lock(0);
@@ -1215,13 +1266,17 @@ static uint16_t *sd_center_crop_canvas(const uint16_t *pixels, int width, int he
 
 static void sd_preview_jpeg_task(void *arg)
 {
+    sd_jpeg_preview_req_t *req = (sd_jpeg_preview_req_t *)arg;
     char path[512];
-    snprintf(path, sizeof(path), "%s", (const char *)arg);
-    free(arg);
+    uint32_t generation = req->generation;
+    snprintf(path, sizeof(path), "%s", req->path);
+    free(req);
 
     FILE *f = fopen(path, "rb");
     if (f == NULL) {
-        sd_preview_message("JPG预览", "文件打开失败");
+        if (generation == s_sd_preview_generation) {
+            sd_preview_message("JPG预览", "文件打开失败");
+        }
         vTaskDelete(NULL);
         return;
     }
@@ -1230,7 +1285,9 @@ static void sd_preview_jpeg_task(void *arg)
     rewind(f);
     if (file_len <= 0 || file_len > SDCARD_IMAGE_PREVIEW_LIMIT) {
         fclose(f);
-        sd_preview_message("JPG预览", "图片过大或为空");
+        if (generation == s_sd_preview_generation) {
+            sd_preview_message("JPG预览", "图片过大或为空");
+        }
         vTaskDelete(NULL);
         return;
     }
@@ -1238,7 +1295,9 @@ static void sd_preview_jpeg_task(void *arg)
     uint8_t *jpeg = heap_caps_malloc(file_len, MALLOC_CAP_8BIT | MALLOC_CAP_SPIRAM);
     if (jpeg == NULL) {
         fclose(f);
-        sd_preview_message("JPG预览", "内存不足");
+        if (generation == s_sd_preview_generation) {
+            sd_preview_message("JPG预览", "内存不足");
+        }
         vTaskDelete(NULL);
         return;
     }
@@ -1246,7 +1305,9 @@ static void sd_preview_jpeg_task(void *arg)
     fclose(f);
     if (got != (size_t)file_len) {
         heap_caps_free(jpeg);
-        sd_preview_message("JPG预览", "读取失败");
+        if (generation == s_sd_preview_generation) {
+            sd_preview_message("JPG预览", "读取失败");
+        }
         vTaskDelete(NULL);
         return;
     }
@@ -1280,20 +1341,24 @@ static void sd_preview_jpeg_task(void *arg)
                     if (canvas == NULL) {
                         ret = ESP_ERR_NO_MEM;
                     } else {
-                        lvgl_port_lock(0);
-                        lv_obj_t *body = sd_preview_create_page("JPG预览");
-                        s_preview_img_buf = (uint8_t *)canvas;
-                        s_preview_img_dsc.header.cf = LV_IMG_CF_TRUE_COLOR;
-                        s_preview_img_dsc.header.always_zero = 0;
-                        s_preview_img_dsc.header.reserved = 0;
-                        s_preview_img_dsc.header.w = SDCARD_PREVIEW_W;
-                        s_preview_img_dsc.header.h = SDCARD_PREVIEW_H;
-                        s_preview_img_dsc.data_size = SDCARD_PREVIEW_W * SDCARD_PREVIEW_H * sizeof(uint16_t);
-                        s_preview_img_dsc.data = s_preview_img_buf;
-                        lv_obj_t *img = lv_img_create(body);
-                        lv_img_set_src(img, &s_preview_img_dsc);
-                        lv_obj_center(img);
-                        lvgl_port_unlock();
+                        if (generation == s_sd_preview_generation) {
+                            lvgl_port_lock(0);
+                            lv_obj_t *body = sd_preview_create_page("JPG预览");
+                            s_preview_img_buf = (uint8_t *)canvas;
+                            s_preview_img_dsc.header.cf = LV_IMG_CF_TRUE_COLOR;
+                            s_preview_img_dsc.header.always_zero = 0;
+                            s_preview_img_dsc.header.reserved = 0;
+                            s_preview_img_dsc.header.w = SDCARD_PREVIEW_W;
+                            s_preview_img_dsc.header.h = SDCARD_PREVIEW_H;
+                            s_preview_img_dsc.data_size = SDCARD_PREVIEW_W * SDCARD_PREVIEW_H * sizeof(uint16_t);
+                            s_preview_img_dsc.data = s_preview_img_buf;
+                            lv_obj_t *img = lv_img_create(body);
+                            lv_img_set_src(img, &s_preview_img_dsc);
+                            lv_obj_center(img);
+                            lvgl_port_unlock();
+                        } else {
+                            heap_caps_free(canvas);
+                        }
                     }
                 }
                 heap_caps_free(decoded);
@@ -1301,19 +1366,24 @@ static void sd_preview_jpeg_task(void *arg)
         }
     }
     heap_caps_free(jpeg);
-    if (ret != ESP_OK) {
+    if (ret != ESP_OK && generation == s_sd_preview_generation) {
         ESP_LOGW(TAG, "jpeg preview failed: %s", esp_err_to_name(ret));
         sd_preview_message("JPG预览", "解码失败");
     }
     vTaskDelete(NULL);
 }
 
-static void sd_preview_jpeg(const char *path)
+static void sd_preview_jpeg(const char *path, uint32_t generation)
 {
-    char *copy = strdup(path);
-    if (copy == NULL ||
-        xTaskCreatePinnedToCore(sd_preview_jpeg_task, "jpg_preview", 8192, copy, 4, NULL, 1) != pdPASS) {
-        free(copy);
+    sd_preview_message("JPG预览", "载入中...");
+    sd_jpeg_preview_req_t *req = malloc(sizeof(*req));
+    if (req != NULL) {
+        snprintf(req->path, sizeof(req->path), "%s", path);
+        req->generation = generation;
+    }
+    if (req == NULL ||
+        xTaskCreatePinnedToCore(sd_preview_jpeg_task, "jpg_preview", 8192, req, 4, NULL, 1) != pdPASS) {
+        free(req);
         sd_preview_message("JPG预览", "任务创建失败");
     }
 }
@@ -1356,26 +1426,45 @@ static void sd_preview_audio(const char *path)
     lvgl_port_unlock();
 }
 
-static void sd_preview_file(const char *path, sd_file_type_t type)
+static void sd_preview_file(const char *path, sd_file_type_t type, off_t file_size)
 {
     switch (type) {
     case SD_FILE_AUDIO:
         sd_preview_audio(path);
         break;
     case SD_FILE_IMAGE_JPEG:
-        sd_preview_jpeg(path);
+        if (file_size <= 0 || file_size > (off_t)SDCARD_IMAGE_PREVIEW_LIMIT) {
+            sd_preview_large_file("JPG预览", file_size, SDCARD_IMAGE_PREVIEW_LIMIT);
+            break;
+        }
+        s_sd_preview_generation++;
+        sd_preview_jpeg(path, s_sd_preview_generation);
         break;
     case SD_FILE_IMAGE_PNG:
+        if (file_size <= 0 || file_size > (off_t)SDCARD_PNG_PREVIEW_LIMIT) {
+            sd_preview_large_file("PNG预览", file_size, SDCARD_PNG_PREVIEW_LIMIT);
+            break;
+        }
         sd_preview_png(path);
         break;
     case SD_FILE_IMAGE_GIF:
+        if (file_size <= 0 || file_size > (off_t)SDCARD_GIF_PREVIEW_LIMIT) {
+            sd_preview_large_file("GIF动图", file_size, SDCARD_GIF_PREVIEW_LIMIT);
+            break;
+        }
         sd_preview_gif(path);
         break;
     case SD_FILE_TEXT:
-        sd_preview_text(path);
+        sd_preview_text(path, file_size);
         break;
     case SD_FILE_VIDEO:
-        sd_preview_message("视频文件", "暂未支持视频播放");
+        {
+            char size_text[24];
+            char message[96];
+            sd_format_file_size(size_text, sizeof(size_text), file_size);
+            snprintf(message, sizeof(message), "暂未支持视频播放\n文件大小: %s", size_text);
+            sd_preview_message("视频文件", message);
+        }
         break;
     default:
         sd_preview_message("文件", "暂不支持预览");
@@ -1500,7 +1589,7 @@ static void file_list_btn_cb(lv_event_t * e)
         }
 
         if (S_ISREG(st.st_mode)) {
-            sd_preview_file(selected_path, sd_classify_file(selected_path));
+            sd_preview_file(selected_path, sd_classify_file(selected_path), st.st_size);
             return;
         }
     }
@@ -2955,6 +3044,348 @@ static void btset_event_handler(lv_event_t * e)
 }
 
 
+/******************************** 录音机 应用程序 *****************************************************************************/
+#define RECORDER_SAMPLE_RATE       16000
+#define RECORDER_CHANNELS          1
+#define RECORDER_BITS_PER_SAMPLE   16
+#define RECORDER_SRC_CHANNELS      ADC_I2S_CHANNEL
+#define RECORDER_FRAMES_PER_CHUNK  512
+#define RECORDER_ICON_FLAG         8
+
+static lv_obj_t *s_recorder_status_label;
+static lv_obj_t *s_recorder_time_label;
+static lv_obj_t *s_recorder_file_label;
+static lv_obj_t *s_recorder_level_bar;
+static lv_obj_t *s_recorder_button_label;
+static TaskHandle_t s_recorder_task_handle;
+static volatile bool s_recorder_active;
+static volatile bool s_recorder_exit_requested;
+
+static void recorder_write_le16(FILE *f, uint16_t value)
+{
+    uint8_t b[2] = {
+        (uint8_t)(value & 0xff),
+        (uint8_t)((value >> 8) & 0xff),
+    };
+    fwrite(b, 1, sizeof(b), f);
+}
+
+static void recorder_write_le32(FILE *f, uint32_t value)
+{
+    uint8_t b[4] = {
+        (uint8_t)(value & 0xff),
+        (uint8_t)((value >> 8) & 0xff),
+        (uint8_t)((value >> 16) & 0xff),
+        (uint8_t)((value >> 24) & 0xff),
+    };
+    fwrite(b, 1, sizeof(b), f);
+}
+
+static void recorder_write_wav_header(FILE *f, uint32_t data_bytes)
+{
+    uint32_t byte_rate = RECORDER_SAMPLE_RATE * RECORDER_CHANNELS * RECORDER_BITS_PER_SAMPLE / 8;
+    uint16_t block_align = RECORDER_CHANNELS * RECORDER_BITS_PER_SAMPLE / 8;
+
+    fwrite("RIFF", 1, 4, f);
+    recorder_write_le32(f, 36 + data_bytes);
+    fwrite("WAVE", 1, 4, f);
+    fwrite("fmt ", 1, 4, f);
+    recorder_write_le32(f, 16);
+    recorder_write_le16(f, 1);
+    recorder_write_le16(f, RECORDER_CHANNELS);
+    recorder_write_le32(f, RECORDER_SAMPLE_RATE);
+    recorder_write_le32(f, byte_rate);
+    recorder_write_le16(f, block_align);
+    recorder_write_le16(f, RECORDER_BITS_PER_SAMPLE);
+    fwrite("data", 1, 4, f);
+    recorder_write_le32(f, data_bytes);
+}
+
+static void recorder_set_label_text(lv_obj_t *label, const char *text)
+{
+    if (label == NULL) {
+        return;
+    }
+    lvgl_port_lock(0);
+    if (label != NULL) {
+        lv_label_set_text(label, text);
+    }
+    lvgl_port_unlock();
+}
+
+static void recorder_update_ui(uint32_t samples_written, int peak)
+{
+    uint32_t seconds = samples_written / RECORDER_SAMPLE_RATE;
+    char time_text[24];
+    snprintf(time_text, sizeof(time_text), "%02lu:%02lu", (unsigned long)(seconds / 60), (unsigned long)(seconds % 60));
+
+    lvgl_port_lock(0);
+    if (s_recorder_time_label != NULL) {
+        lv_label_set_text(s_recorder_time_label, time_text);
+    }
+    if (s_recorder_level_bar != NULL) {
+        int value = peak * 100 / 32767;
+        if (value > 100) {
+            value = 100;
+        }
+        lv_bar_set_value(s_recorder_level_bar, value, LV_ANIM_OFF);
+    }
+    lvgl_port_unlock();
+}
+
+static void recorder_set_button_text(const char *text)
+{
+    recorder_set_label_text(s_recorder_button_label, text);
+}
+
+static void recorder_stop_and_exit_ui(void)
+{
+    lvgl_port_lock(0);
+    if (icon_in_obj != NULL) {
+        lv_obj_del(icon_in_obj);
+        icon_in_obj = NULL;
+    }
+    lvgl_port_unlock();
+    s_recorder_status_label = NULL;
+    s_recorder_time_label = NULL;
+    s_recorder_file_label = NULL;
+    s_recorder_level_bar = NULL;
+    s_recorder_button_label = NULL;
+    icon_flag = 0;
+}
+
+static void recorder_task(void *arg)
+{
+    int16_t *raw = heap_caps_malloc(RECORDER_FRAMES_PER_CHUNK * RECORDER_SRC_CHANNELS * sizeof(int16_t), MALLOC_CAP_8BIT | MALLOC_CAP_INTERNAL);
+    int16_t *mono = heap_caps_malloc(RECORDER_FRAMES_PER_CHUNK * sizeof(int16_t), MALLOC_CAP_8BIT | MALLOC_CAP_INTERNAL);
+    FILE *f = NULL;
+    uint32_t data_bytes = 0;
+    uint32_t samples_written = 0;
+    char path[128];
+    esp_err_t ret = ESP_OK;
+
+    if (raw == NULL || mono == NULL) {
+        recorder_set_label_text(s_recorder_status_label, "录音缓冲不足");
+        goto done;
+    }
+
+    if (g_audio_player_ready) {
+        audio_player_stop();
+    }
+
+    ret = bsp_sdcard_mount();
+    if (ret != ESP_OK) {
+        recorder_set_label_text(s_recorder_status_label, "TF卡不可用");
+        goto done;
+    }
+
+    mkdir(SD_MOUNT_POINT "/szpi", 0775);
+    mkdir(SD_MOUNT_POINT "/szpi/recordings", 0775);
+    snprintf(path, sizeof(path), SD_MOUNT_POINT "/szpi/recordings/rec_%lld.wav", esp_timer_get_time() / 1000);
+
+    f = fopen(path, "wb+");
+    if (f == NULL) {
+        recorder_set_label_text(s_recorder_status_label, "创建文件失败");
+        goto done;
+    }
+
+    recorder_write_wav_header(f, 0);
+    recorder_set_label_text(s_recorder_status_label, "录音中...");
+    recorder_set_label_text(s_recorder_file_label, path);
+    recorder_set_button_text("停止");
+
+    while (s_recorder_active && icon_flag == RECORDER_ICON_FLAG) {
+        ret = bsp_get_feed_data(true, raw, RECORDER_FRAMES_PER_CHUNK * RECORDER_SRC_CHANNELS * sizeof(int16_t));
+        if (ret != ESP_OK) {
+            recorder_set_label_text(s_recorder_status_label, "麦克风读取失败");
+            break;
+        }
+
+        int peak = 0;
+        for (int i = 0; i < RECORDER_FRAMES_PER_CHUNK; i++) {
+            int16_t sample = raw[i * RECORDER_SRC_CHANNELS + 1];
+            mono[i] = sample;
+            int abs_sample = sample == INT16_MIN ? 32767 : abs(sample);
+            if (abs_sample > peak) {
+                peak = abs_sample;
+            }
+        }
+
+        size_t written = fwrite(mono, sizeof(int16_t), RECORDER_FRAMES_PER_CHUNK, f);
+        if (written != RECORDER_FRAMES_PER_CHUNK) {
+            recorder_set_label_text(s_recorder_status_label, "写入失败");
+            break;
+        }
+
+        data_bytes += RECORDER_FRAMES_PER_CHUNK * sizeof(int16_t);
+        samples_written += RECORDER_FRAMES_PER_CHUNK;
+        recorder_update_ui(samples_written, peak);
+    }
+
+    if (f != NULL) {
+        fflush(f);
+        fseek(f, 0, SEEK_SET);
+        recorder_write_wav_header(f, data_bytes);
+        fclose(f);
+        f = NULL;
+    }
+
+    if (data_bytes > 0) {
+        recorder_set_label_text(s_recorder_status_label, "已保存");
+        recorder_set_label_text(s_recorder_file_label, path);
+    }
+
+done:
+    if (f != NULL) {
+        fclose(f);
+    }
+    if (raw != NULL) {
+        heap_caps_free(raw);
+    }
+    if (mono != NULL) {
+        heap_caps_free(mono);
+    }
+    s_recorder_active = false;
+    s_recorder_task_handle = NULL;
+    recorder_set_button_text("开始");
+    if (s_recorder_exit_requested) {
+        s_recorder_exit_requested = false;
+        recorder_stop_and_exit_ui();
+    }
+    vTaskDelete(NULL);
+}
+
+static void recorder_toggle_cb(lv_event_t *e)
+{
+    if (lv_event_get_code(e) != LV_EVENT_CLICKED) {
+        return;
+    }
+
+    if (s_recorder_active) {
+        s_recorder_active = false;
+        recorder_set_label_text(s_recorder_status_label, "停止中...");
+        return;
+    }
+
+    if (s_recorder_task_handle != NULL) {
+        return;
+    }
+
+    s_recorder_exit_requested = false;
+    s_recorder_active = true;
+    recorder_update_ui(0, 0);
+    recorder_set_label_text(s_recorder_file_label, "");
+    BaseType_t ok = xTaskCreatePinnedToCore(recorder_task, "recorder", 5 * 1024, NULL, 5, &s_recorder_task_handle, 1);
+    if (ok != pdPASS) {
+        s_recorder_active = false;
+        s_recorder_task_handle = NULL;
+        recorder_set_label_text(s_recorder_status_label, "启动失败");
+    }
+}
+
+static void recorder_back_cb(lv_event_t *e)
+{
+    if (lv_event_get_code(e) != LV_EVENT_CLICKED) {
+        return;
+    }
+
+    if (s_recorder_active) {
+        s_recorder_exit_requested = true;
+        s_recorder_active = false;
+        recorder_set_label_text(s_recorder_status_label, "停止中...");
+        return;
+    }
+
+    recorder_stop_and_exit_ui();
+}
+
+static void recorder_event_handler(lv_event_t *e)
+{
+    static lv_style_t style;
+    lv_style_init(&style);
+    lv_style_set_radius(&style, 10);
+    lv_style_set_bg_opa(&style, LV_OPA_COVER);
+    lv_style_set_bg_color(&style, lv_color_hex(0xffffff));
+    lv_style_set_border_width(&style, 0);
+    lv_style_set_pad_all(&style, 0);
+    lv_style_set_width(&style, 320);
+    lv_style_set_height(&style, 240);
+
+    icon_in_obj = lv_obj_create(lv_scr_act());
+    lv_obj_add_style(icon_in_obj, &style, 0);
+
+    lv_obj_t *title = lv_obj_create(icon_in_obj);
+    lv_obj_set_size(title, 320, 40);
+    lv_obj_set_style_pad_all(title, 0, 0);
+    lv_obj_align(title, LV_ALIGN_TOP_LEFT, 0, 0);
+    lv_obj_set_style_bg_color(title, lv_color_hex(0x2c8dbf), 0);
+
+    lv_obj_t *title_label = lv_label_create(title);
+    lv_label_set_text(title_label, "录音机");
+    lv_obj_set_style_text_color(title_label, lv_color_hex(0xffffff), 0);
+    lv_obj_set_style_text_font(title_label, &font_alipuhui20, 0);
+    lv_obj_align(title_label, LV_ALIGN_CENTER, 0, 0);
+
+    lv_obj_t *btn_back = lv_btn_create(title);
+    lv_obj_align(btn_back, LV_ALIGN_LEFT_MID, 0, 0);
+    lv_obj_set_size(btn_back, 60, 30);
+    lv_obj_set_style_border_width(btn_back, 0, 0);
+    lv_obj_set_style_pad_all(btn_back, 0, 0);
+    lv_obj_set_style_bg_opa(btn_back, LV_OPA_TRANSP, LV_PART_MAIN);
+    lv_obj_set_style_shadow_opa(btn_back, LV_OPA_TRANSP, LV_PART_MAIN);
+    lv_obj_add_event_cb(btn_back, recorder_back_cb, LV_EVENT_CLICKED, NULL);
+
+    lv_obj_t *label_back = lv_label_create(btn_back);
+    lv_label_set_text(label_back, LV_SYMBOL_LEFT);
+    lv_obj_set_style_text_font(label_back, &lv_font_montserrat_20, 0);
+    lv_obj_set_style_text_color(label_back, lv_color_hex(0xffffff), 0);
+    lv_obj_align(label_back, LV_ALIGN_CENTER, -10, 0);
+
+    s_recorder_time_label = lv_label_create(icon_in_obj);
+    lv_label_set_text(s_recorder_time_label, "00:00");
+    lv_obj_set_style_text_font(s_recorder_time_label, &lv_font_montserrat_24, 0);
+    lv_obj_set_style_text_color(s_recorder_time_label, lv_color_hex(0x1f2933), 0);
+    lv_obj_align(s_recorder_time_label, LV_ALIGN_TOP_MID, 0, 62);
+
+    s_recorder_status_label = lv_label_create(icon_in_obj);
+    lv_label_set_text(s_recorder_status_label, "Ready");
+    lv_obj_set_style_text_font(s_recorder_status_label, &font_alipuhui20, 0);
+    lv_obj_set_style_text_color(s_recorder_status_label, lv_color_hex(0x3b4856), 0);
+    lv_obj_align(s_recorder_status_label, LV_ALIGN_TOP_MID, 0, 98);
+
+    s_recorder_level_bar = lv_bar_create(icon_in_obj);
+    lv_obj_set_size(s_recorder_level_bar, 220, 12);
+    lv_bar_set_range(s_recorder_level_bar, 0, 100);
+    lv_bar_set_value(s_recorder_level_bar, 0, LV_ANIM_OFF);
+    lv_obj_align(s_recorder_level_bar, LV_ALIGN_TOP_MID, 0, 128);
+
+    lv_obj_t *btn_record = lv_btn_create(icon_in_obj);
+    lv_obj_set_size(btn_record, 118, 46);
+    lv_obj_align(btn_record, LV_ALIGN_TOP_MID, 0, 154);
+    lv_obj_set_style_bg_color(btn_record, lv_color_hex(0xd64b4b), 0);
+    lv_obj_set_style_radius(btn_record, 8, 0);
+    lv_obj_add_event_cb(btn_record, recorder_toggle_cb, LV_EVENT_CLICKED, NULL);
+
+    s_recorder_button_label = lv_label_create(btn_record);
+    lv_label_set_text(s_recorder_button_label, "开始");
+    lv_obj_set_style_text_font(s_recorder_button_label, &font_alipuhui20, 0);
+    lv_obj_set_style_text_color(s_recorder_button_label, lv_color_hex(0xffffff), 0);
+    lv_obj_center(s_recorder_button_label);
+
+    s_recorder_file_label = lv_label_create(icon_in_obj);
+    lv_label_set_text(s_recorder_file_label, "");
+    lv_label_set_long_mode(s_recorder_file_label, LV_LABEL_LONG_SCROLL_CIRCULAR);
+    lv_obj_set_width(s_recorder_file_label, 290);
+    lv_obj_set_style_text_font(s_recorder_file_label, &lv_font_montserrat_14, 0);
+    lv_obj_set_style_text_color(s_recorder_file_label, lv_color_hex(0x627181), 0);
+    lv_obj_align(s_recorder_file_label, LV_ALIGN_BOTTOM_MID, 0, -12);
+
+    s_recorder_active = false;
+    s_recorder_exit_requested = false;
+    icon_flag = RECORDER_ICON_FLAG;
+}
+
+
 /******************************** 主界面  ******************************/
 
 LV_IMG_DECLARE(img_att_icon);
@@ -2995,6 +3426,7 @@ static const home_app_item_t s_home_apps[] = {
     { "姿态",   "QMI8658", 0xf06d2f, HOME_ICON_IMAGE,  &img_att_icon,     att_event_handler },
     { "音乐",   "Player", 0x4c7bd9, HOME_ICON_IMAGE,  &img_music_icon,   music_event_handler },
     { "TF卡",   "Files",  0x009688, HOME_ICON_IMAGE,  &img_sd_icon,      sdcard_event_handler },
+    { "录音",   "WAV",    0x2c8dbf, HOME_ICON_SYMBOL, LV_SYMBOL_AUDIO,   recorder_event_handler },
     { "摄像头", "Camera", 0xd8a318, HOME_ICON_IMAGE,  &img_camera_icon,  camera_event_handler },
     { "WLAN",   "Scan",   0xc85a5a, HOME_ICON_IMAGE,  &img_wifiset_icon, wifiset_event_handler },
     { "蓝牙",   "HID",    0xa36bb8, HOME_ICON_IMAGE,  &img_btset_icon,   btset_event_handler },
