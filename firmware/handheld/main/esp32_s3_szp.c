@@ -2,6 +2,8 @@
 #include <stdlib.h>
 #include "esp32_s3_szp.h"
 #include "ff.h"
+#include "diskio_impl.h"
+#include "diskio_sdmmc.h"
 #include "vfs_fat_internal.h"
 #include <sys/stat.h>
 
@@ -977,6 +979,106 @@ static uint8_t bsp_sdcard_find_partition_for_lba(const bsp_sdcard_info_t *info, 
     return 0xff;
 }
 
+static void bsp_sdcard_host_deinit(const sdmmc_host_t *host)
+{
+    if (host->flags & SDMMC_HOST_FLAG_DEINIT_ARG) {
+        host->deinit_p(host->slot);
+    } else {
+        host->deinit();
+    }
+}
+
+static esp_err_t bsp_sdcard_recovery_format_raw(bsp_sdcard_format_t format, int *fatfs_result)
+{
+    esp_err_t ret;
+    BYTE pdrv = FF_DRV_NOT_USED;
+    sdmmc_card_t *card = calloc(1, sizeof(sdmmc_card_t));
+    bool host_inited = false;
+    bool diskio_registered = false;
+    void *workbuf = NULL;
+
+    if (fatfs_result != NULL) {
+        *fatfs_result = FR_OK;
+    }
+    if (card == NULL) {
+        return ESP_ERR_NO_MEM;
+    }
+    if (ff_diskio_get_drive(&pdrv) != ESP_OK || pdrv == FF_DRV_NOT_USED) {
+        free(card);
+        return ESP_ERR_NO_MEM;
+    }
+
+    sdmmc_host_t host = SDMMC_HOST_DEFAULT();
+    sdmmc_slot_config_t slot_config = SDMMC_SLOT_CONFIG_DEFAULT();
+    slot_config.width = 1;
+    slot_config.clk = SD_CLK_IO;
+    slot_config.cmd = SD_CMD_IO;
+    slot_config.d0 = SD_DAT0_IO;
+    slot_config.flags |= SDMMC_SLOT_FLAG_INTERNAL_PULLUP;
+
+    ret = host.init();
+    if (ret != ESP_OK) {
+        goto cleanup;
+    }
+    host_inited = true;
+
+    ret = sdmmc_host_init_slot(host.slot, &slot_config);
+    if (ret != ESP_OK) {
+        goto cleanup;
+    }
+
+    ret = sdmmc_card_init(&host, card);
+    if (ret != ESP_OK) {
+        goto cleanup;
+    }
+
+    ff_diskio_register_sdmmc(pdrv, card);
+    diskio_registered = true;
+
+    char drv[3] = {(char)('0' + pdrv), ':', 0};
+    const size_t workbuf_size = 4096;
+    workbuf = ff_memalloc(workbuf_size);
+    if (workbuf == NULL) {
+        ret = ESP_ERR_NO_MEM;
+        goto cleanup;
+    }
+
+    size_t alloc_unit_size = esp_vfs_fat_get_allocation_unit_size(card->csd.sector_size, 8 * 1024);
+    MKFS_PARM opt = {
+        .fmt = bsp_sdcard_format_flag(format) | FM_SFD,
+        .n_fat = 2,
+        .align = 0,
+        .n_root = 0,
+        .au_size = alloc_unit_size,
+    };
+    ESP_LOGW(TAG, "Recovery raw format: fmt=0x%x au=%u pdrv=%u",
+             opt.fmt, (unsigned)alloc_unit_size, (unsigned)pdrv);
+    FRESULT res = f_mkfs(drv, &opt, workbuf, workbuf_size);
+    if (fatfs_result != NULL) {
+        *fatfs_result = res;
+    }
+    if (res != FR_OK) {
+        ESP_LOGE(TAG, "raw recovery f_mkfs failed (%d)", res);
+        ret = ESP_FAIL;
+        goto cleanup;
+    }
+
+    ret = ESP_OK;
+
+cleanup:
+    if (workbuf != NULL) {
+        ff_memfree(workbuf);
+    }
+    if (diskio_registered) {
+        ff_diskio_unregister(pdrv);
+    }
+    if (host_inited) {
+        bsp_sdcard_host_deinit(&host);
+    }
+    free(card);
+    return ret;
+}
+
 static esp_err_t bsp_sdcard_mount_internal(bool format_if_mount_failed)
 {
     if (sdmmc_card != NULL) {
@@ -1022,16 +1124,15 @@ esp_err_t bsp_sdcard_format_with_result(bsp_sdcard_format_t format, int *fatfs_r
         if (fatfs_result != NULL) {
             *fatfs_result = -1;
         }
-        ESP_LOGW(TAG, "mount before format failed (%s), trying recovery format",
+        ESP_LOGW(TAG, "mount before format failed (%s), trying raw recovery format",
                  esp_err_to_name(mount_ret));
-        ESP_RETURN_ON_ERROR(bsp_sdcard_mount_internal(true), TAG, "recovery format mount failed");
-        if (format == BSP_SDCARD_FORMAT_AUTO) {
-            ESP_RETURN_ON_ERROR(bsp_sdcard_prepare_product_dirs(), TAG, "prepare sdcard dirs failed");
-            if (fatfs_result != NULL) {
-                *fatfs_result = FR_OK;
-            }
-            return ESP_OK;
+        ESP_RETURN_ON_ERROR(bsp_sdcard_recovery_format_raw(format, fatfs_result), TAG, "raw recovery format failed");
+        ESP_RETURN_ON_ERROR(bsp_sdcard_mount(), TAG, "mount after raw recovery format failed");
+        ESP_RETURN_ON_ERROR(bsp_sdcard_prepare_product_dirs(), TAG, "prepare sdcard dirs failed");
+        if (fatfs_result != NULL) {
+            *fatfs_result = FR_OK;
         }
+        return ESP_OK;
     }
     if (sdmmc_card == NULL) {
         return ESP_ERR_INVALID_STATE;

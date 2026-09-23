@@ -356,8 +356,19 @@ static void wifi_event_handler(void *arg, esp_event_base_t event_base, int32_t e
     }
 }
 
+static bool wifi_sta_is_connected(void)
+{
+    wifi_ap_record_t ap_info;
+    return esp_wifi_sta_get_ap_info(&ap_info) == ESP_OK;
+}
+
 static esp_err_t wifi_connect_sta(void)
 {
+    if (wifi_sta_is_connected()) {
+        ESP_LOGI(TAG, "reuse existing WiFi connection");
+        return ESP_OK;
+    }
+
     if (strlen(s_wifi_ssid) == 0) {
         ESP_LOGW(TAG, "WiFi SSID is empty");
         return ESP_ERR_INVALID_STATE;

@@ -14,7 +14,7 @@ menu "Random Image LVGL App"
 
     config RANDOM_IMAGE_API_URL
         string "Random image JPEG URL"
-        default "https://example.com/image.php?key=change-me&return=print&esp=1"
+        default "https://api.xiwangly.com/image.php?key=xiwangly&return=print&esp=1"
         help
             Endpoint returning a JPEG image body.
 

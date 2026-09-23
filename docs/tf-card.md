@@ -99,8 +99,10 @@ one FatFs volume at `/sdcard`.
 The device formatter preserves the current partition table and formats the
 mounted partition. Whole-card repartitioning is a future advanced feature.
 If the filesystem is already damaged and cannot be mounted, the formatter falls
-back to a recovery format so the card can become mountable again. That recovery
-path is slower than the normal mounted-volume quick format.
+back to a raw-volume recovery format so the card can become mountable again.
+That recovery path is slower than the normal mounted-volume quick format and
+may convert the card to a superfloppy-style FAT/exFAT volume without a partition
+table.
 
 USB-ZIP, USB-FDD, and HDD modes are legacy PC BIOS boot-disk layout concepts.
 They are not SDMMC electrical modes and are not required for this handheld to

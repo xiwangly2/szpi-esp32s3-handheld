@@ -2645,7 +2645,7 @@ static void wifi_save_random_image_config(const char *ssid, const char *password
             "# Used by random image app. Edit on your computer if needed.\n"
             "ssid=%s\n"
             "password=%s\n"
-            "api=%s\n",
+            "api_url=%s\n",
             ssid ? ssid : "",
             password ? password : "",
             CONFIG_RANDOM_IMAGE_API_URL);
