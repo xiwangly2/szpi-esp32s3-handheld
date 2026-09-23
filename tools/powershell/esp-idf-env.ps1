@@ -1,5 +1,6 @@
 $ErrorActionPreference = "Stop"
 
+$EspIdfEnvHadProcessorArchitecture = [bool]$env:PROCESSOR_ARCHITECTURE
 if ($IsWindows -and -not $env:PROCESSOR_ARCHITECTURE) {
     $arch = [System.Runtime.InteropServices.RuntimeInformation]::ProcessArchitecture.ToString()
     $env:PROCESSOR_ARCHITECTURE = switch ($arch) {

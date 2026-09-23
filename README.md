@@ -67,6 +67,7 @@ PHP API 默认 key 是 `change-me`，部署时复制 `backend/image-api/config.s
 - [Getting Started](docs/getting-started.md)
 - [TF Card Layout](docs/tf-card.md)
 - [VS Code ESP-IDF](docs/vscode-esp-idf.md)
+- [Windows Environment](docs/windows-environment.md)
 - [Feature Notes](docs/features.md)
 - [Release Build](docs/release.md)
 
