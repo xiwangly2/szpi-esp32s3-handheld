@@ -28,14 +28,19 @@ currently detected as media but not played.
 
 Large previews are guarded before LVGL receives the file:
 
-- JPG: up to 2 MB, decoded in a worker task
-- PNG: up to 768 KB
-- GIF: up to 512 KB
+- JPG: up to 768 KB, decoded in a worker task with a PSRAM largest-block check
+- PNG: up to 256 KB
+- GIF: up to 256 KB
 - text: only the first 4 KB is loaded into the text preview
+- audio: files above 128 MB are skipped by the touch preview/player entry
 
 Files above those limits show a size message instead of being decoded
 automatically. This keeps large media from blocking the UI thread or causing
 repeated refresh glitches on a small embedded display.
+
+Very large directories are also capped in the touch file manager. The list shows
+the first 160 entries and then a truncation row, keeping LVGL object counts
+bounded on cards with bulk media dumps.
 
 The TF card file manager is kept focused on browsing and media previews. Disk
 operations live in the separate TF manager page.

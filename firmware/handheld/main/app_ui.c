@@ -1088,10 +1088,14 @@ static lv_obj_t *s_sdmgr_info_label;
 #define SDCARD_PREVIEW_H (BSP_LCD_V_RES - SDCARD_PREVIEW_TOP)
 #define SDCARD_PREVIEW_FULL_H BSP_LCD_V_RES
 #define SDCARD_TEXT_PREVIEW_LIMIT 4096
-#define SDCARD_IMAGE_PREVIEW_LIMIT (2 * 1024 * 1024)
-#define SDCARD_PNG_PREVIEW_LIMIT (768 * 1024)
-#define SDCARD_GIF_PREVIEW_LIMIT (512 * 1024)
+#define SDCARD_IMAGE_PREVIEW_LIMIT (768 * 1024)
+#define SDCARD_PNG_PREVIEW_LIMIT (256 * 1024)
+#define SDCARD_GIF_PREVIEW_LIMIT (256 * 1024)
+#define SDCARD_AUDIO_PLAY_LIMIT (128 * 1024 * 1024)
+#define SDCARD_LIST_MAX_ITEMS 160
 #define SDCARD_TEXT_PREVIEW_EXTRA 96
+#define SDCARD_JPEG_CANVAS_BYTES (SDCARD_PREVIEW_W * SDCARD_PREVIEW_FULL_H * sizeof(uint16_t))
+#define SDCARD_SPIRAM_SAFETY_MARGIN (256 * 1024)
 
 extern sdmmc_card_t *sdmmc_card;
 
@@ -1269,6 +1273,17 @@ static void sd_preview_large_file(const char *title, off_t file_size, size_t lim
              "文件较大，已跳过自动预览\n大小: %s\n安全上限: %s\n\n请压缩或裁切后再预览",
              file_size_text, limit_text);
     sd_preview_message(title, message);
+}
+
+static bool sd_spiram_has_budget(size_t required)
+{
+    size_t largest = heap_caps_get_largest_free_block(MALLOC_CAP_SPIRAM);
+    if (largest >= required + SDCARD_SPIRAM_SAFETY_MARGIN) {
+        return true;
+    }
+    ESP_LOGW(TAG, "skip preview: need=%u largest_psram=%u",
+             (unsigned)required, (unsigned)largest);
+    return false;
 }
 
 static void *sd_lv_fs_open(lv_fs_drv_t *drv, const char *path, lv_fs_mode_t mode)
@@ -1612,6 +1627,14 @@ static void sd_preview_jpeg_task(void *arg)
         vTaskDelete(NULL);
         return;
     }
+    if (!sd_spiram_has_budget((size_t)file_len + SDCARD_JPEG_CANVAS_BYTES)) {
+        fclose(f);
+        if (generation == s_sd_preview_generation) {
+            sd_preview_message("JPG预览", "内存余量不足，已跳过预览");
+        }
+        vTaskDelete(NULL);
+        return;
+    }
 
     uint8_t *jpeg = heap_caps_malloc(file_len, MALLOC_CAP_8BIT | MALLOC_CAP_SPIRAM);
     if (jpeg == NULL) {
@@ -1649,42 +1672,46 @@ static void sd_preview_jpeg_task(void *arg)
         esp_jpeg_image_output_t outimg = { 0 };
         ret = esp_jpeg_get_image_info(&info_cfg, &outimg);
         if (ret == ESP_OK) {
-            uint16_t *decoded = heap_caps_malloc(outimg.output_len, MALLOC_CAP_8BIT | MALLOC_CAP_SPIRAM);
-            if (decoded == NULL) {
+            if (!sd_spiram_has_budget((size_t)file_len + outimg.output_len + SDCARD_JPEG_CANVAS_BYTES)) {
                 ret = ESP_ERR_NO_MEM;
             } else {
-                esp_jpeg_image_cfg_t jpeg_cfg = info_cfg;
-                jpeg_cfg.outbuf = (uint8_t *)decoded;
-                jpeg_cfg.outbuf_size = outimg.output_len;
-                ret = esp_jpeg_decode(&jpeg_cfg, &outimg);
-                if (ret == ESP_OK) {
-                    uint16_t *canvas = sd_center_crop_canvas(decoded, outimg.width, outimg.height,
-                                                             SDCARD_PREVIEW_W, SDCARD_PREVIEW_FULL_H);
-                    if (canvas == NULL) {
-                        ret = ESP_ERR_NO_MEM;
-                    } else {
-                        if (generation == s_sd_preview_generation) {
-                            lvgl_port_lock(0);
-                            lv_obj_t *body = sd_preview_create_page("JPG预览");
-                            s_preview_img_buf = (uint8_t *)canvas;
-                            s_preview_img_dsc.header.cf = LV_IMG_CF_TRUE_COLOR;
-                            s_preview_img_dsc.header.always_zero = 0;
-                            s_preview_img_dsc.header.reserved = 0;
-                            s_preview_img_dsc.header.w = SDCARD_PREVIEW_W;
-                            s_preview_img_dsc.header.h = SDCARD_PREVIEW_FULL_H;
-                            s_preview_img_dsc.data_size = SDCARD_PREVIEW_W * SDCARD_PREVIEW_FULL_H * sizeof(uint16_t);
-                            s_preview_img_dsc.data = s_preview_img_buf;
-                            lv_obj_t *img = lv_img_create(body);
-                            lv_img_set_src(img, &s_preview_img_dsc);
-                            lv_obj_center(img);
-                            sd_preview_enable_fullscreen_toggle(body, img);
-                            lvgl_port_unlock();
+                uint16_t *decoded = heap_caps_malloc(outimg.output_len, MALLOC_CAP_8BIT | MALLOC_CAP_SPIRAM);
+                if (decoded == NULL) {
+                    ret = ESP_ERR_NO_MEM;
+                } else {
+                    esp_jpeg_image_cfg_t jpeg_cfg = info_cfg;
+                    jpeg_cfg.outbuf = (uint8_t *)decoded;
+                    jpeg_cfg.outbuf_size = outimg.output_len;
+                    ret = esp_jpeg_decode(&jpeg_cfg, &outimg);
+                    if (ret == ESP_OK) {
+                        uint16_t *canvas = sd_center_crop_canvas(decoded, outimg.width, outimg.height,
+                                                                 SDCARD_PREVIEW_W, SDCARD_PREVIEW_FULL_H);
+                        if (canvas == NULL) {
+                            ret = ESP_ERR_NO_MEM;
                         } else {
-                            heap_caps_free(canvas);
+                            if (generation == s_sd_preview_generation) {
+                                lvgl_port_lock(0);
+                                lv_obj_t *body = sd_preview_create_page("JPG预览");
+                                s_preview_img_buf = (uint8_t *)canvas;
+                                s_preview_img_dsc.header.cf = LV_IMG_CF_TRUE_COLOR;
+                                s_preview_img_dsc.header.always_zero = 0;
+                                s_preview_img_dsc.header.reserved = 0;
+                                s_preview_img_dsc.header.w = SDCARD_PREVIEW_W;
+                                s_preview_img_dsc.header.h = SDCARD_PREVIEW_FULL_H;
+                                s_preview_img_dsc.data_size = SDCARD_JPEG_CANVAS_BYTES;
+                                s_preview_img_dsc.data = s_preview_img_buf;
+                                lv_obj_t *img = lv_img_create(body);
+                                lv_img_set_src(img, &s_preview_img_dsc);
+                                lv_obj_center(img);
+                                sd_preview_enable_fullscreen_toggle(body, img);
+                                lvgl_port_unlock();
+                            } else {
+                                heap_caps_free(canvas);
+                            }
                         }
                     }
+                    heap_caps_free(decoded);
                 }
-                heap_caps_free(decoded);
             }
         }
     }
@@ -1757,6 +1784,10 @@ static void sd_preview_file(const char *path, sd_file_type_t type, off_t file_si
 {
     switch (type) {
     case SD_FILE_AUDIO:
+        if (file_size <= 0 || file_size > (off_t)SDCARD_AUDIO_PLAY_LIMIT) {
+            sd_preview_large_file("音频播放", file_size, SDCARD_AUDIO_PLAY_LIMIT);
+            break;
+        }
         if (!music_open_from_path(path, true)) {
             sd_preview_message("音频播放", "播放器初始化失败");
         }
@@ -2145,8 +2176,17 @@ esp_err_t list_sdcard_files(char * path)
     DIR *dir;
     struct dirent *ent;
     lv_obj_t * btn;
+    size_t shown = 0;
+    bool truncated = false;
     if ((dir = opendir(path))!= NULL) { // 打开目录
         while ((ent = readdir(dir))!= NULL) { // 读取目录中的文件
+            if (strcmp(ent->d_name, ".") == 0 || strcmp(ent->d_name, "..") == 0) {
+                continue;
+            }
+            if (shown >= SDCARD_LIST_MAX_ITEMS) {
+                truncated = true;
+                break;
+            }
             /* 常规文件处理 */
             if (ent->d_type == DT_REG){ // 如果是常规文件
                 sd_file_type_t file_type = sd_classify_file(ent->d_name);
@@ -2174,6 +2214,7 @@ esp_err_t list_sdcard_files(char * path)
                 lv_obj_t *icon = lv_obj_get_child(btn, 0); // 获取图标指针
                 lv_obj_set_style_text_font(icon, &lv_font_montserrat_24, 0); // 修改图标的字体    
                 lv_obj_add_event_cb(btn, file_list_btn_cb, LV_EVENT_CLICKED, NULL);  // 添加点击回调函数
+                shown++;
                 lvgl_port_unlock();
             }
             /* 文件夹处理 */
@@ -2183,10 +2224,19 @@ esp_err_t list_sdcard_files(char * path)
                 lv_obj_t *icon = lv_obj_get_child(btn, 0); // 获取图标指针
                 lv_obj_set_style_text_font(icon, &lv_font_montserrat_24, 0); // 修改图标的字体
                 lv_obj_add_event_cb(btn, file_list_btn_cb, LV_EVENT_CLICKED, NULL); // 添加点击回调函数
+                shown++;
                 lvgl_port_unlock();
             }
         }
         closedir(dir);
+        if (truncated) {
+            char message[64];
+            snprintf(message, sizeof(message), "仅显示前 %u 项", (unsigned)SDCARD_LIST_MAX_ITEMS);
+            lvgl_port_lock(0);
+            btn = lv_list_add_btn(sdcard_file_list, LV_SYMBOL_WARNING, message);
+            lv_obj_set_style_text_font(btn, &font_alipuhui20, 0);
+            lvgl_port_unlock();
+        }
         ret = ESP_OK;
     } else {
         ESP_LOGE(TAG, "Failed to open directory %s.", path);
@@ -4692,7 +4742,16 @@ static void media_item_cb(lv_event_t *e)
     sd_file_type_t type = item->type;
     off_t bytes = (off_t)item->bytes;
 
+    struct stat st;
+    if (stat(path, &st) == 0 && S_ISREG(st.st_mode)) {
+        bytes = st.st_size;
+    }
+
     if (type == SD_FILE_AUDIO) {
+        if (bytes <= 0 || bytes > (off_t)SDCARD_AUDIO_PLAY_LIMIT) {
+            sd_preview_large_file("音频播放", bytes, SDCARD_AUDIO_PLAY_LIMIT);
+            return;
+        }
         s_music_return_to_media = true;
         if (music_open_from_path(path, false)) {
             s_media_page_active = false;
@@ -4705,10 +4764,6 @@ static void media_item_cb(lv_event_t *e)
         return;
     }
 
-    struct stat st;
-    if (stat(path, &st) == 0 && S_ISREG(st.st_mode)) {
-        bytes = st.st_size;
-    }
     sd_preview_file(path, type, bytes);
 }
 
