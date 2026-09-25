@@ -24,6 +24,7 @@
 #include <sys/stat.h>
 #include <time.h>
 #include <sys/time.h>
+#include <unistd.h>
 #include <strings.h>
 #include "esp_netif_sntp.h"
 #include "esp_sntp.h"
@@ -1092,7 +1093,8 @@ static lv_obj_t *s_sdmgr_info_label;
 #define SDCARD_PNG_PREVIEW_LIMIT (256 * 1024)
 #define SDCARD_GIF_PREVIEW_LIMIT (256 * 1024)
 #define SDCARD_AUDIO_PLAY_LIMIT (128 * 1024 * 1024)
-#define SDCARD_LIST_MAX_ITEMS 160
+#define SDCARD_LIST_PAGE_SIZE 80
+#define SDCARD_LIST_MAX_ITEMS 2048
 #define SDCARD_TEXT_PREVIEW_EXTRA 96
 #define SDCARD_JPEG_CANVAS_BYTES (SDCARD_PREVIEW_W * SDCARD_PREVIEW_FULL_H * sizeof(uint16_t))
 #define SDCARD_SPIRAM_SAFETY_MARGIN (256 * 1024)
@@ -1127,6 +1129,7 @@ static lv_obj_t *s_preview_media_obj;
 static bool s_preview_fullscreen;
 static bool s_lv_fs_ready;
 static volatile uint32_t s_sd_preview_generation;
+static size_t s_sd_list_offset;
 static bsp_sdcard_format_t s_sd_format_target = BSP_SDCARD_FORMAT_AUTO;
 static bool s_sd_format_confirm;
 static TaskHandle_t s_sd_format_task_handle;
@@ -1142,6 +1145,7 @@ typedef struct {
 // 函数声明
 esp_err_t list_sdcard_files(char * path);
 static void file_list_btn_cb(lv_event_t * e); 
+static void sdcard_page_btn_cb(lv_event_t *e);
 static void btn_sdback_cb(lv_event_t * e);
 static void sd_preview_message(const char *title, const char *message);
 
@@ -2067,6 +2071,7 @@ static void btn_sdback_cb(lv_event_t * e)
         icon_flag = 0;
     }else{
         lv_obj_clean(sdcard_file_list); // 清除当前wifi列表
+        s_sd_list_offset = 0;
         esp_err_t ret = list_sdcard_files(file_path_info.path_back); // 列出上一级目录文件
         if (ret == ESP_OK){ // 如果成功列出目录
             strcpy(file_path_info.path_now, file_path_info.path_back); // 刚刚进入的这个目录路径 变成当前路径
@@ -2081,6 +2086,28 @@ static void btn_sdback_cb(lv_event_t * e)
             ESP_LOGI(TAG, "path_back: %s", file_path_info.path_back);
         }
     }
+}
+
+static void sdcard_add_list_message(const char *symbol, const char *message)
+{
+    lv_obj_t *btn = lv_list_add_btn(sdcard_file_list, symbol, message);
+    lv_obj_set_style_text_font(btn, &font_alipuhui20, 0);
+}
+
+static void sdcard_style_file_button(lv_obj_t *btn)
+{
+    lv_obj_t *icon = lv_obj_get_child(btn, 0);
+    if (icon != NULL) {
+        lv_obj_set_style_text_font(icon, &lv_font_montserrat_24, 0);
+    }
+    lv_obj_add_event_cb(btn, file_list_btn_cb, LV_EVENT_CLICKED, NULL);
+}
+
+static void sdcard_add_page_button(const char *text, intptr_t delta)
+{
+    lv_obj_t *btn = lv_list_add_btn(sdcard_file_list, delta < 0 ? LV_SYMBOL_UP : LV_SYMBOL_DOWN, text);
+    lv_obj_set_style_text_font(btn, &font_alipuhui20, 0);
+    lv_obj_add_event_cb(btn, sdcard_page_btn_cb, LV_EVENT_CLICKED, (void *)delta);
 }
 
 static void sdcard_create_page_shell(const char *title_text)
@@ -2176,17 +2203,30 @@ esp_err_t list_sdcard_files(char * path)
     DIR *dir;
     struct dirent *ent;
     lv_obj_t * btn;
+    size_t seen = 0;
     size_t shown = 0;
-    bool truncated = false;
+    bool has_next = false;
+    bool max_reached = false;
     if ((dir = opendir(path))!= NULL) { // 打开目录
         while ((ent = readdir(dir))!= NULL) { // 读取目录中的文件
             if (strcmp(ent->d_name, ".") == 0 || strcmp(ent->d_name, "..") == 0) {
                 continue;
             }
-            if (shown >= SDCARD_LIST_MAX_ITEMS) {
-                truncated = true;
+
+            if (seen >= SDCARD_LIST_MAX_ITEMS) {
+                max_reached = true;
                 break;
             }
+
+            if (seen++ < s_sd_list_offset) {
+                continue;
+            }
+
+            if (shown >= SDCARD_LIST_PAGE_SIZE) {
+                has_next = true;
+                break;
+            }
+
             /* 常规文件处理 */
             if (ent->d_type == DT_REG){ // 如果是常规文件
                 sd_file_type_t file_type = sd_classify_file(ent->d_name);
@@ -2211,9 +2251,7 @@ esp_err_t list_sdcard_files(char * path)
                     btn = lv_list_add_btn(sdcard_file_list, LV_SYMBOL_FILE, (const char *)ent->d_name);  // 显示普通文件图标
                     break;
                 }
-                lv_obj_t *icon = lv_obj_get_child(btn, 0); // 获取图标指针
-                lv_obj_set_style_text_font(icon, &lv_font_montserrat_24, 0); // 修改图标的字体    
-                lv_obj_add_event_cb(btn, file_list_btn_cb, LV_EVENT_CLICKED, NULL);  // 添加点击回调函数
+                sdcard_style_file_button(btn);
                 shown++;
                 lvgl_port_unlock();
             }
@@ -2221,28 +2259,63 @@ esp_err_t list_sdcard_files(char * path)
             else if (ent->d_type == DT_DIR) { // 如果是文件夹
                 lvgl_port_lock(0);
                 btn = lv_list_add_btn(sdcard_file_list, LV_SYMBOL_DIRECTORY, (const char *)ent->d_name); 
-                lv_obj_t *icon = lv_obj_get_child(btn, 0); // 获取图标指针
-                lv_obj_set_style_text_font(icon, &lv_font_montserrat_24, 0); // 修改图标的字体
-                lv_obj_add_event_cb(btn, file_list_btn_cb, LV_EVENT_CLICKED, NULL); // 添加点击回调函数
+                sdcard_style_file_button(btn);
                 shown++;
                 lvgl_port_unlock();
             }
         }
         closedir(dir);
-        if (truncated) {
+        lvgl_port_lock(0);
+        if (shown == 0) {
+            sdcard_add_list_message(LV_SYMBOL_FILE,
+                                    s_sd_list_offset == 0 ? "空目录" : "没有更多项目");
+        } else {
             char message[64];
-            snprintf(message, sizeof(message), "仅显示前 %u 项", (unsigned)SDCARD_LIST_MAX_ITEMS);
-            lvgl_port_lock(0);
-            btn = lv_list_add_btn(sdcard_file_list, LV_SYMBOL_WARNING, message);
-            lv_obj_set_style_text_font(btn, &font_alipuhui20, 0);
-            lvgl_port_unlock();
+            snprintf(message, sizeof(message), "第 %u-%u 项",
+                     (unsigned)(s_sd_list_offset + 1),
+                     (unsigned)(s_sd_list_offset + shown));
+            sdcard_add_list_message(LV_SYMBOL_LIST, message);
         }
+        if (s_sd_list_offset > 0) {
+            sdcard_add_page_button("上一页", -(intptr_t)SDCARD_LIST_PAGE_SIZE);
+        }
+        if (has_next) {
+            sdcard_add_page_button("下一页", (intptr_t)SDCARD_LIST_PAGE_SIZE);
+        } else if (max_reached) {
+            char message[80];
+            snprintf(message, sizeof(message), "仅浏览前 %u 项", (unsigned)SDCARD_LIST_MAX_ITEMS);
+            sdcard_add_list_message(LV_SYMBOL_WARNING, message);
+        }
+        lvgl_port_unlock();
         ret = ESP_OK;
     } else {
         ESP_LOGE(TAG, "Failed to open directory %s.", path);
         ret = ESP_FAIL;
     }
     return ret;
+}
+
+static void sdcard_page_btn_cb(lv_event_t *e)
+{
+    if (lv_event_get_code(e) != LV_EVENT_CLICKED || sdcard_file_list == NULL) {
+        return;
+    }
+
+    intptr_t delta = (intptr_t)lv_event_get_user_data(e);
+    if (delta < 0) {
+        size_t step = (size_t)(-delta);
+        s_sd_list_offset = s_sd_list_offset > step ? s_sd_list_offset - step : 0;
+    } else {
+        s_sd_list_offset += (size_t)delta;
+        if (s_sd_list_offset > SDCARD_LIST_MAX_ITEMS) {
+            s_sd_list_offset = SDCARD_LIST_MAX_ITEMS;
+        }
+    }
+
+    lv_obj_clean(sdcard_file_list);
+    if (list_sdcard_files(file_path_info.path_now) != ESP_OK) {
+        sdcard_add_list_message(LV_SYMBOL_WARNING, "目录读取失败");
+    }
 }
 
 // 文件点击 事件处理函数
@@ -2266,6 +2339,7 @@ static void file_list_btn_cb(lv_event_t * e)
             strcpy(file_path_info.path_back, file_path_info.path_now); // 保存上一级目录
             strcpy(file_path_info.path_now, selected_path);
             lv_obj_clean(sdcard_file_list); // 清除当前wifi列表
+            s_sd_list_offset = 0;
             esp_err_t ret = list_sdcard_files(file_path_info.path_now);
             if (ret == ESP_OK){ // 如果成功列出了目录
                 file_path_info.path_index++; // 表示进入到下一集目录
@@ -2339,6 +2413,7 @@ static void task_process_sdcard(void *arg)
         // 列出 SD 卡中的文件
         file_path_info.path_index = 0; // 表示当前在根目录
         strcpy(file_path_info.path_now, SD_MOUNT_POINT); // 装入当前路径
+        s_sd_list_offset = 0;
         list_sdcard_files(file_path_info.path_now); // 列出当前目录文件
     }
     
@@ -4449,6 +4524,7 @@ static lv_obj_t *s_media_info_label;
 static lv_obj_t *s_media_list;
 static TaskHandle_t s_media_scan_task_handle;
 static volatile bool s_media_page_active;
+static volatile bool s_media_scan_cancel;
 static media_index_stats_t s_media_last_stats;
 static media_filter_t s_media_filter = MEDIA_FILTER_ALL;
 static media_list_item_t *s_media_items[MEDIA_LIST_MAX_ITEMS];
@@ -4618,6 +4694,9 @@ static void media_index_write_row(FILE *f, sd_file_type_t type, uint64_t bytes, 
 
 static void media_scan_dir(media_scan_ctx_t *ctx, const char *path, int depth)
 {
+    if (s_media_scan_cancel || !s_media_page_active) {
+        return;
+    }
     if (ctx->stats.files >= MEDIA_SCAN_MAX_FILES) {
         ctx->stats.limit_reached = true;
         return;
@@ -4634,6 +4713,10 @@ static void media_scan_dir(media_scan_ctx_t *ctx, const char *path, int depth)
     ctx->stats.dirs++;
     struct dirent *ent;
     while ((ent = readdir(dir)) != NULL) {
+        if (s_media_scan_cancel || !s_media_page_active) {
+            break;
+        }
+
         if (strcmp(ent->d_name, ".") == 0 || strcmp(ent->d_name, "..") == 0) {
             continue;
         }
@@ -4660,6 +4743,9 @@ static void media_scan_dir(media_scan_ctx_t *ctx, const char *path, int depth)
             uint64_t bytes = st.st_size > 0 ? (uint64_t)st.st_size : 0;
             media_stats_add_file(&ctx->stats, type, bytes);
             media_index_write_row(ctx->index, type, bytes, child);
+            if ((ctx->stats.files & 0x1f) == 0) {
+                vTaskDelay(1);
+            }
         }
 
         if (ctx->stats.limit_reached) {
@@ -4893,9 +4979,15 @@ static void media_scan_task(void *arg)
         fclose(ctx.index);
     }
 
-    s_media_last_stats = ctx.stats;
-    media_update_ui(ctx.stats.limit_reached ? "索引完成(已截断)" : "索引完成", &ctx.stats);
-    media_populate_list(s_media_filter);
+    bool cancelled = s_media_scan_cancel || !s_media_page_active;
+    if (cancelled) {
+        unlink(MEDIA_INDEX_PATH);
+        ESP_LOGI(TAG, "media scan cancelled");
+    } else {
+        s_media_last_stats = ctx.stats;
+        media_update_ui(ctx.stats.limit_reached ? "索引完成(已截断)" : "索引完成", &ctx.stats);
+        media_populate_list(s_media_filter);
+    }
     s_media_scan_task_handle = NULL;
     vTaskDelete(NULL);
 }
@@ -4912,6 +5004,7 @@ static void media_start_scan(void)
     if (s_media_status_label != NULL) {
         lv_label_set_text(s_media_status_label, "正在索引...");
     }
+    s_media_scan_cancel = false;
     BaseType_t ok = xTaskCreatePinnedToCore(media_scan_task, "media_scan", 10 * 1024,
                                             NULL, 4, &s_media_scan_task_handle, 1);
     if (ok != pdPASS) {
@@ -4945,6 +5038,7 @@ static void media_back_cb(lv_event_t *e)
         return;
     }
 
+    s_media_scan_cancel = true;
     s_media_page_active = false;
     s_music_return_to_media = false;
     media_forget_list_items();

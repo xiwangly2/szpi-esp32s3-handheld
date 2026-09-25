@@ -38,16 +38,18 @@ Files above those limits show a size message instead of being decoded
 automatically. This keeps large media from blocking the UI thread or causing
 repeated refresh glitches on a small embedded display.
 
-Very large directories are also capped in the touch file manager. The list shows
-the first 160 entries and then a truncation row, keeping LVGL object counts
-bounded on cards with bulk media dumps.
+Very large directories are paged in the touch file manager. Each page creates at
+most 80 visible rows, with previous/next rows for navigation and a hard browse
+guard at the first 2048 entries. This keeps LVGL object counts bounded on cards
+with bulk media dumps.
 
 The TF card file manager is kept focused on browsing and media previews. Disk
 operations live in the separate TF manager page.
 
 The media library builds `/szpi/cache/media_index.tsv` in the background and
-can browse that index by all media, images, audio, or text. Opening an indexed
-entry reuses the same preview and music-player paths as the TF card file
+can browse that index by all media, images, audio, or text. Leaving the media
+library cancels an in-flight scan and discards the partial index. Opening an
+indexed entry reuses the same preview and music-player paths as the TF card file
 manager.
 
 The TF manager page shows capacity, mounted filesystem, partition table type
