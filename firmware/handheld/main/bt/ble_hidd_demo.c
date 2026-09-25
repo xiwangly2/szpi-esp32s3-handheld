@@ -7,6 +7,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include "ble_hidd_demo.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "freertos/event_groups.h"
@@ -24,10 +25,7 @@
 #include "esp_gatt_defs.h"
 #include "esp_bt_main.h"
 #include "esp_bt_device.h"
-#include "driver/gpio.h"
 #include "hid_dev.h"
-
-#include "esp_lvgl_port.h"
 
 /**
  * Brief:
@@ -55,12 +53,17 @@ static uint16_t hid_conn_id = 0;
 static bool sec_conn = false;
 static bool s_bt_hid_started;
 static bool s_bt_classic_released;
+static bool s_bt_shutting_down;
+static bool s_hid_connected;
+static bool s_hid_advertising;
+static bool s_hid_have_remote;
+static esp_bd_addr_t s_hid_remote_bda;
 
 #define CHAR_DECLARATION_SIZE   (sizeof(uint8_t))
 
 static void hidd_event_callback(esp_hidd_cb_event_t event, esp_hidd_cb_param_t *param);
 
-#define HIDD_DEVICE_NAME            "HID"
+#define HIDD_DEVICE_NAME            "SZPI-HID"
 static uint8_t hidd_service_uuid128[] = {
     /* LSB <--------------------------------------------------------------------------------> MSB */
     //first uuid, 16bit, [12],[13] is the value
@@ -115,12 +118,21 @@ static void hidd_event_callback(esp_hidd_cb_event_t event, esp_hidd_cb_param_t *
 		case ESP_HIDD_EVENT_BLE_CONNECT: {
             ESP_LOGI(HID_DEMO_TAG, "ESP_HIDD_EVENT_BLE_CONNECT");
             hid_conn_id = param->connect.conn_id;
+            s_hid_connected = true;
+            s_hid_advertising = false;
+            s_hid_have_remote = true;
+            memcpy(s_hid_remote_bda, param->connect.remote_bda, sizeof(esp_bd_addr_t));
             break;
         }
         case ESP_HIDD_EVENT_BLE_DISCONNECT: {
             sec_conn = false;
+            s_hid_connected = false;
+            s_hid_have_remote = false;
+            hid_conn_id = 0;
             ESP_LOGI(HID_DEMO_TAG, "ESP_HIDD_EVENT_BLE_DISCONNECT");
-            esp_ble_gap_start_advertising(&hidd_adv_params);
+            if (s_bt_hid_started && !s_bt_shutting_down) {
+                esp_ble_gap_start_advertising(&hidd_adv_params);
+            }
             break;
         }
         case ESP_HIDD_EVENT_BLE_VENDOR_REPORT_WRITE_EVT: {
@@ -145,6 +157,13 @@ static void gap_event_handler(esp_gap_ble_cb_event_t event, esp_ble_gap_cb_param
     case ESP_GAP_BLE_ADV_DATA_SET_COMPLETE_EVT:
         esp_ble_gap_start_advertising(&hidd_adv_params);
         break;
+    case ESP_GAP_BLE_ADV_START_COMPLETE_EVT:
+        s_hid_advertising = param->adv_start_cmpl.status == ESP_BT_STATUS_SUCCESS;
+        ESP_LOGI(HID_DEMO_TAG, "advertising %s", s_hid_advertising ? "started" : "failed");
+        break;
+    case ESP_GAP_BLE_ADV_STOP_COMPLETE_EVT:
+        s_hid_advertising = false;
+        break;
      case ESP_GAP_BLE_SEC_REQ_EVT:
         for(int i = 0; i < ESP_BD_ADDR_LEN; i++) {
              ESP_LOGD(HID_DEMO_TAG, "%x:",param->ble_security.ble_req.bd_addr[i]);
@@ -152,7 +171,7 @@ static void gap_event_handler(esp_gap_ble_cb_event_t event, esp_ble_gap_cb_param
         esp_ble_gap_security_rsp(param->ble_security.ble_req.bd_addr, true);
 	 break;
      case ESP_GAP_BLE_AUTH_CMPL_EVT:
-        sec_conn = true;
+        sec_conn = param->ble_security.auth_cmpl.success;
         esp_bd_addr_t bd_addr;
         memcpy(bd_addr, param->ble_security.auth_cmpl.bd_addr, sizeof(esp_bd_addr_t));
         ESP_LOGI(HID_DEMO_TAG, "remote BD_ADDR: %08x%04x",\
@@ -176,6 +195,13 @@ static esp_err_t bt_hid_start(void)
     if (s_bt_hid_started) {
         return ESP_OK;
     }
+
+    s_bt_shutting_down = false;
+    s_hid_connected = false;
+    s_hid_advertising = false;
+    s_hid_have_remote = false;
+    sec_conn = false;
+    hid_conn_id = 0;
 
     if (!s_bt_classic_released) {
         ret = esp_bt_controller_mem_release(ESP_BT_MODE_CLASSIC_BT);
@@ -251,70 +277,258 @@ static esp_err_t bt_hid_start(void)
     return ESP_OK;
 }
 
-static void btn2_event_handler(lv_event_t * e)
-{
-    lv_event_code_t code = lv_event_get_code(e);
-
-    if (sec_conn) {
-        if(code == LV_EVENT_PRESSING) {
-            esp_hidd_send_consumer_value(hid_conn_id, HID_CONSUMER_VOLUME_UP, true);
-            ESP_LOGI(HID_DEMO_TAG, "UP LV_EVENT_CLICKED");
-        }
-        else if(code == LV_EVENT_RELEASED) {
-            esp_hidd_send_consumer_value(hid_conn_id, HID_CONSUMER_VOLUME_UP, false);
-            ESP_LOGI(HID_DEMO_TAG, "UP LV_EVENT_RELEASED");
-        }
-    }
-}
-
-static void btn1_event_handler(lv_event_t * e)
-{
-    lv_event_code_t code = lv_event_get_code(e);
-
-    if (sec_conn) {
-        if(code == LV_EVENT_PRESSING) {
-            esp_hidd_send_consumer_value(hid_conn_id, HID_CONSUMER_VOLUME_DOWN, true);
-            ESP_LOGI(HID_DEMO_TAG, "DOWN LV_EVENT_CLICKED");
-        }
-        else if(code == LV_EVENT_RELEASED) {
-            esp_hidd_send_consumer_value(hid_conn_id, HID_CONSUMER_VOLUME_DOWN, false);
-            ESP_LOGI(HID_DEMO_TAG, "DOWN LV_EVENT_RELEASED");
-        }
-    }
-}
-
-
-extern lv_obj_t * icon_in_obj;
 // 运行蓝牙HID控制程序
 esp_err_t app_hid_ctrl(void)
 {
-    lvgl_port_lock(0);
-
-    lv_obj_t * label;
-
-    lv_obj_t * btn1 = lv_btn_create(icon_in_obj);
-    lv_obj_add_event_cb(btn1, btn1_event_handler, LV_EVENT_ALL, NULL);
-    lv_obj_align(btn1, LV_ALIGN_CENTER, -50, 0);
-    lv_obj_set_size(btn1, 80, 80);
-
-    label = lv_label_create(btn1);
-    lv_label_set_text(label, LV_SYMBOL_VOLUME_MID);
-    lv_obj_set_style_text_font(label, &lv_font_montserrat_20, 0);
-    lv_obj_center(label);
-
-    lv_obj_t * btn2 = lv_btn_create(icon_in_obj);
-    lv_obj_add_event_cb(btn2, btn2_event_handler, LV_EVENT_ALL, NULL);
-    lv_obj_align(btn2, LV_ALIGN_CENTER, 50, 0);
-    lv_obj_set_size(btn2, 80, 80);
-
-    label = lv_label_create(btn2);
-    lv_label_set_text(label, LV_SYMBOL_VOLUME_MAX);
-    lv_obj_set_style_text_font(label, &lv_font_montserrat_20, 0);
-    lv_obj_center(label);
-
-    lvgl_port_unlock();
-
     return bt_hid_start();
+}
+
+static uint8_t bt_hid_action_usage(bt_hid_action_t action)
+{
+    switch (action) {
+    case BT_HID_ACTION_PLAY_PAUSE:
+        return HID_CONSUMER_PLAY_PAUSE;
+    case BT_HID_ACTION_PREV:
+        return HID_CONSUMER_SCAN_PREV_TRK;
+    case BT_HID_ACTION_NEXT:
+        return HID_CONSUMER_SCAN_NEXT_TRK;
+    case BT_HID_ACTION_STOP:
+        return HID_CONSUMER_STOP;
+    case BT_HID_ACTION_MUTE:
+        return HID_CONSUMER_MUTE;
+    case BT_HID_ACTION_VOLUME_DOWN:
+        return HID_CONSUMER_VOLUME_DOWN;
+    case BT_HID_ACTION_VOLUME_UP:
+        return HID_CONSUMER_VOLUME_UP;
+    default:
+        return 0;
+    }
+}
+
+const char *bt_hid_action_name(bt_hid_action_t action)
+{
+    switch (action) {
+    case BT_HID_ACTION_PLAY_PAUSE:
+        return "播放/暂停";
+    case BT_HID_ACTION_PREV:
+        return "上一首";
+    case BT_HID_ACTION_NEXT:
+        return "下一首";
+    case BT_HID_ACTION_STOP:
+        return "停止";
+    case BT_HID_ACTION_MUTE:
+        return "静音";
+    case BT_HID_ACTION_VOLUME_DOWN:
+        return "音量-";
+    case BT_HID_ACTION_VOLUME_UP:
+        return "音量+";
+    default:
+        return "未知";
+    }
+}
+
+esp_err_t bt_hid_send_action(bt_hid_action_t action)
+{
+    uint8_t usage = bt_hid_action_usage(action);
+    if (usage == 0) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    if (!s_bt_hid_started || !s_hid_connected || !sec_conn) {
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    esp_hidd_send_consumer_value(hid_conn_id, usage, true);
+    vTaskDelay(15 / portTICK_PERIOD_MS);
+    esp_hidd_send_consumer_value(hid_conn_id, usage, false);
+    ESP_LOGI(HID_DEMO_TAG, "sent action: %s", bt_hid_action_name(action));
+    return ESP_OK;
+}
+
+static uint8_t bt_hid_key_usage(bt_hid_key_action_t action)
+{
+    switch (action) {
+    case BT_HID_KEY_UP:
+        return HID_KEY_UP_ARROW;
+    case BT_HID_KEY_DOWN:
+        return HID_KEY_DOWN_ARROW;
+    case BT_HID_KEY_LEFT:
+        return HID_KEY_LEFT_ARROW;
+    case BT_HID_KEY_RIGHT:
+        return HID_KEY_RIGHT_ARROW;
+    case BT_HID_KEY_ENTER:
+        return HID_KEY_RETURN;
+    case BT_HID_KEY_ESCAPE:
+        return HID_KEY_ESCAPE;
+    case BT_HID_KEY_SPACE:
+        return HID_KEY_SPACEBAR;
+    case BT_HID_KEY_BACKSPACE:
+        return HID_KEY_DELETE;
+    default:
+        return 0;
+    }
+}
+
+const char *bt_hid_key_action_name(bt_hid_key_action_t action)
+{
+    switch (action) {
+    case BT_HID_KEY_UP:
+        return "上";
+    case BT_HID_KEY_DOWN:
+        return "下";
+    case BT_HID_KEY_LEFT:
+        return "左";
+    case BT_HID_KEY_RIGHT:
+        return "右";
+    case BT_HID_KEY_ENTER:
+        return "回车";
+    case BT_HID_KEY_ESCAPE:
+        return "Esc";
+    case BT_HID_KEY_SPACE:
+        return "空格";
+    case BT_HID_KEY_BACKSPACE:
+        return "退格";
+    default:
+        return "未知";
+    }
+}
+
+esp_err_t bt_hid_send_key_action(bt_hid_key_action_t action)
+{
+    uint8_t key = bt_hid_key_usage(action);
+    if (key == 0) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    if (!s_bt_hid_started || !s_hid_connected || !sec_conn) {
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    esp_hidd_send_keyboard_value(hid_conn_id, 0, &key, 1);
+    vTaskDelay(15 / portTICK_PERIOD_MS);
+    esp_hidd_send_keyboard_value(hid_conn_id, 0, NULL, 0);
+    ESP_LOGI(HID_DEMO_TAG, "sent key: %s", bt_hid_key_action_name(action));
+    return ESP_OK;
+}
+
+const char *bt_hid_mouse_action_name(bt_hid_mouse_action_t action)
+{
+    switch (action) {
+    case BT_HID_MOUSE_UP:
+        return "鼠标上移";
+    case BT_HID_MOUSE_DOWN:
+        return "鼠标下移";
+    case BT_HID_MOUSE_LEFT:
+        return "鼠标左移";
+    case BT_HID_MOUSE_RIGHT:
+        return "鼠标右移";
+    case BT_HID_MOUSE_LEFT_CLICK:
+        return "左键";
+    case BT_HID_MOUSE_RIGHT_CLICK:
+        return "右键";
+    default:
+        return "未知";
+    }
+}
+
+esp_err_t bt_hid_send_mouse_action(bt_hid_mouse_action_t action)
+{
+    if (!s_bt_hid_started || !s_hid_connected || !sec_conn) {
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    int8_t dx = 0;
+    int8_t dy = 0;
+    uint8_t button = 0;
+    switch (action) {
+    case BT_HID_MOUSE_UP:
+        dy = -12;
+        break;
+    case BT_HID_MOUSE_DOWN:
+        dy = 12;
+        break;
+    case BT_HID_MOUSE_LEFT:
+        dx = -12;
+        break;
+    case BT_HID_MOUSE_RIGHT:
+        dx = 12;
+        break;
+    case BT_HID_MOUSE_LEFT_CLICK:
+        button = 0x01;
+        break;
+    case BT_HID_MOUSE_RIGHT_CLICK:
+        button = 0x02;
+        break;
+    default:
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    esp_hidd_send_mouse_value(hid_conn_id, button, dx, dy);
+    if (button != 0) {
+        vTaskDelay(15 / portTICK_PERIOD_MS);
+        esp_hidd_send_mouse_value(hid_conn_id, 0, 0, 0);
+    }
+    ESP_LOGI(HID_DEMO_TAG, "sent mouse: %s", bt_hid_mouse_action_name(action));
+    return ESP_OK;
+}
+
+bool bt_hid_is_started(void)
+{
+    return s_bt_hid_started;
+}
+
+bool bt_hid_is_connected(void)
+{
+    return s_hid_connected;
+}
+
+bool bt_hid_is_ready(void)
+{
+    return s_bt_hid_started && s_hid_connected && sec_conn;
+}
+
+const char *bt_hid_status_text(void)
+{
+    if (!s_bt_hid_started) {
+        return "已关闭";
+    }
+    if (s_hid_connected && sec_conn) {
+        return "已配对，可控制";
+    }
+    if (s_hid_connected) {
+        return "已连接，等待配对";
+    }
+    if (s_hid_advertising) {
+        return "广播中，等待连接";
+    }
+    return "启动中";
+}
+
+esp_err_t bt_hid_clear_bonds(void)
+{
+    if (!s_bt_hid_started) {
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    int dev_num = esp_ble_get_bond_device_num();
+    if (dev_num <= 0) {
+        return ESP_OK;
+    }
+
+    esp_ble_bond_dev_t *dev_list = calloc((size_t)dev_num, sizeof(*dev_list));
+    if (dev_list == NULL) {
+        return ESP_ERR_NO_MEM;
+    }
+
+    esp_err_t ret = esp_ble_get_bond_device_list(&dev_num, dev_list);
+    if (ret == ESP_OK) {
+        for (int i = 0; i < dev_num; i++) {
+            esp_err_t remove_ret = esp_ble_remove_bond_device(dev_list[i].bd_addr);
+            if (remove_ret != ESP_OK) {
+                ret = remove_ret;
+            }
+        }
+    }
+    free(dev_list);
+    return ret;
 }
 
 // 关闭蓝牙 
@@ -323,6 +537,16 @@ esp_err_t bt_hid_end(void)
     esp_err_t ret = ESP_OK;
     if (!s_bt_hid_started) {
         return ESP_OK;
+    }
+
+    s_bt_shutting_down = true;
+    if (s_hid_connected && s_hid_have_remote) {
+        ret |= esp_ble_gap_disconnect(s_hid_remote_bda);
+        vTaskDelay(60 / portTICK_PERIOD_MS);
+    }
+    if (s_hid_advertising) {
+        ret |= esp_ble_gap_stop_advertising();
+        vTaskDelay(30 / portTICK_PERIOD_MS);
     }
 
     ret |= esp_hidd_profile_deinit();
@@ -348,6 +572,10 @@ esp_err_t bt_hid_end(void)
 
     sec_conn = false;
     hid_conn_id = 0;
+    s_hid_connected = false;
+    s_hid_advertising = false;
+    s_hid_have_remote = false;
+    s_bt_shutting_down = false;
     s_bt_hid_started = false;
     return ret;
 }

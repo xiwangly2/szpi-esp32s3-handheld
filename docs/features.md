@@ -110,13 +110,24 @@ The currently connected network is also synced to the random image app config.
 
 ## Bluetooth
 
-The current page is a BLE HID demo. It has been made reentrant so repeatedly
-opening the page is less likely to crash. A2DP speaker, Bluetooth microphone,
-and richer pairing UX are future work.
+The current page is a BLE HID combo controller. It advertises as `SZPI-HID`,
+shows connection/pairing state, and has three touch modes:
+
+- media remote: play/pause, previous track, next track, stop, mute, volume down,
+  volume up, and clear pairing
+- keyboard: arrow keys, Enter, Esc, Space, and Backspace
+- mouse: cursor movement plus left/right click
+
+The clear-pairing action helps recover from stale host bonds.
+
+ESP32-S3 does not provide Bluetooth Classic A2DP/HFP audio in this firmware
+target. A complete Bluetooth speaker or microphone product should be treated as
+a future BLE Audio experiment where supported, or as an external Classic
+Bluetooth audio module connected by I2S or UART.
 
 ## Roadmap
 
 Exploratory directions are intentionally tracked as future work until they are
-stable on real hardware: A2DP speaker, Bluetooth microphone, USB plug-and-play
-camera, short video playback, camera recording, a fuller media library,
-thumbnail generation, and background indexing.
+stable on real hardware: BLE Audio or external A2DP/HFP audio module support,
+USB plug-and-play camera, short video playback, camera recording, a fuller media
+library, thumbnail generation, and background indexing.

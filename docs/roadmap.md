@@ -7,8 +7,8 @@ firmware work; some need external hardware because of ESP32-S3 limits.
 
 - Media library scan and `/szpi/cache/media_index.tsv`.
 - TF card file browsing and safe previews for common media types.
-- Camera photo capture, WAV recorder, MP3/WAV playback, WLAN history, and random
-  image caching.
+- Camera photo capture, WAV recorder, MP3/WAV playback, WLAN history, BLE HID
+  combo control, and random image caching.
 
 ## Next
 
@@ -21,10 +21,10 @@ firmware work; some need external hardware because of ESP32-S3 limits.
 
 ## Hardware Notes
 
-- ESP32-S3 has BLE, not Bluetooth Classic. Board-only A2DP sink/source is not a
-  realistic target. For Bluetooth speaker/microphone features, use BLE Audio
-  experiments where supported or add an external Classic Bluetooth audio module
-  connected by I2S/UART.
+- ESP32-S3 has BLE, not Bluetooth Classic. Board-only A2DP/HFP speaker or
+  microphone modes are not realistic targets. For Bluetooth speaker/microphone
+  features, use BLE Audio experiments where supported or add an external Classic
+  Bluetooth audio module connected by I2S/UART.
 - USB camera means a physical UVC camera attached to the ESP32-S3 USB Host/OTG
   port. It is possible only within USB full-speed and driver limits. Tiny MJPEG
   or low-resolution streams are more realistic than high-frame-rate UVC.

@@ -4060,16 +4060,262 @@ static void wifiset_event_handler(lv_event_t * e)
 /******************************** 第6个图标 蓝牙设置 应用程序***********************************************************************************/
 lv_obj_t * ble_label;
 lv_obj_t * btn_ble_back;
+static lv_obj_t *s_ble_status_label;
+static lv_obj_t *s_ble_last_label;
+static lv_obj_t *s_ble_control_layer;
+static lv_obj_t *s_ble_mode_buttons[3];
+static lv_timer_t *s_ble_status_timer;
+
+typedef enum {
+    BLE_UI_MODE_MEDIA = 0,
+    BLE_UI_MODE_KEYBOARD,
+    BLE_UI_MODE_MOUSE,
+} ble_ui_mode_t;
+
+static ble_ui_mode_t s_ble_mode = BLE_UI_MODE_MEDIA;
+
+static void ble_mode_cb(lv_event_t *e);
+static void ble_rebuild_controls(void);
+
+static void ble_clear_refs(void)
+{
+    ble_label = NULL;
+    btn_ble_back = NULL;
+    s_ble_status_label = NULL;
+    s_ble_last_label = NULL;
+    s_ble_control_layer = NULL;
+    memset(s_ble_mode_buttons, 0, sizeof(s_ble_mode_buttons));
+}
+
+static void ble_update_status(void)
+{
+    if (s_ble_status_label != NULL) {
+        lv_label_set_text_fmt(s_ble_status_label, "状态: %s", bt_hid_status_text());
+    }
+}
+
+static void ble_status_timer_cb(lv_timer_t *timer)
+{
+    (void)timer;
+    ble_update_status();
+}
 
 // 返回主界面按钮事件处理函数
 static void btn_ble_back_cb(lv_event_t * e)
 {
+    if (s_ble_status_timer != NULL) {
+        lv_timer_del(s_ble_status_timer);
+        s_ble_status_timer = NULL;
+    }
     bt_hid_end();
     if (icon_in_obj != NULL) {
         lv_obj_del(icon_in_obj);
         icon_in_obj = NULL;
     }
+    ble_clear_refs();
     icon_flag = 0;
+}
+
+static void ble_action_cb(lv_event_t *e)
+{
+    if (lv_event_get_code(e) != LV_EVENT_CLICKED) {
+        return;
+    }
+
+    bt_hid_action_t action = (bt_hid_action_t)(intptr_t)lv_event_get_user_data(e);
+    esp_err_t ret = bt_hid_send_action(action);
+    if (s_ble_last_label != NULL) {
+        if (ret == ESP_OK) {
+            lv_label_set_text_fmt(s_ble_last_label, "已发送: %s", bt_hid_action_name(action));
+        } else {
+            lv_label_set_text_fmt(s_ble_last_label, "未发送: %s", bt_hid_status_text());
+        }
+    }
+    ble_update_status();
+}
+
+static void ble_clear_bonds_cb(lv_event_t *e)
+{
+    if (lv_event_get_code(e) != LV_EVENT_CLICKED) {
+        return;
+    }
+
+    esp_err_t ret = bt_hid_clear_bonds();
+    if (s_ble_last_label != NULL) {
+        lv_label_set_text(s_ble_last_label, ret == ESP_OK ? "已清除配对记录" : "清除配对失败");
+    }
+    ble_update_status();
+}
+
+static lv_obj_t *ble_create_button(lv_obj_t *parent, const char *symbol, int x, int y,
+                                   lv_color_t color, lv_event_cb_t cb, void *user_data)
+{
+    lv_obj_t *btn = lv_btn_create(parent);
+    lv_obj_set_size(btn, 52, 34);
+    lv_obj_align(btn, LV_ALIGN_TOP_LEFT, x, y);
+    lv_obj_set_style_radius(btn, 8, 0);
+    lv_obj_set_style_border_width(btn, 0, 0);
+    lv_obj_set_style_shadow_opa(btn, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_bg_color(btn, color, 0);
+    lv_obj_add_event_cb(btn, cb, LV_EVENT_CLICKED, user_data);
+
+    lv_obj_t *label = lv_label_create(btn);
+    lv_label_set_text(label, symbol);
+    lv_obj_set_style_text_font(label, &lv_font_montserrat_20, 0);
+    lv_obj_set_style_text_color(label, lv_color_hex(0xffffff), 0);
+    lv_obj_center(label);
+    return btn;
+}
+
+static lv_obj_t *ble_create_mode_button(lv_obj_t *parent, const char *text, int x,
+                                        ble_ui_mode_t mode)
+{
+    lv_obj_t *btn = lv_btn_create(parent);
+    lv_obj_set_size(btn, 78, 28);
+    lv_obj_align(btn, LV_ALIGN_TOP_LEFT, x, 88);
+    lv_obj_set_style_radius(btn, 6, 0);
+    lv_obj_set_style_border_width(btn, 0, 0);
+    lv_obj_set_style_shadow_opa(btn, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_bg_color(btn,
+                              s_ble_mode == mode ? lv_color_hex(0x2f6f9f) : lv_color_hex(0x94a3b8),
+                              0);
+    lv_obj_add_event_cb(btn, ble_mode_cb, LV_EVENT_CLICKED, (void *)(intptr_t)mode);
+
+    lv_obj_t *label = lv_label_create(btn);
+    lv_label_set_text(label, text);
+    lv_obj_set_style_text_font(label, &font_alipuhui20, 0);
+    lv_obj_set_style_text_color(label, lv_color_hex(0xffffff), 0);
+    lv_obj_center(label);
+    if ((size_t)mode < sizeof(s_ble_mode_buttons) / sizeof(s_ble_mode_buttons[0])) {
+        s_ble_mode_buttons[mode] = btn;
+    }
+    return btn;
+}
+
+static void ble_update_mode_buttons(void)
+{
+    for (size_t i = 0; i < sizeof(s_ble_mode_buttons) / sizeof(s_ble_mode_buttons[0]); i++) {
+        if (s_ble_mode_buttons[i] != NULL) {
+            lv_obj_set_style_bg_color(s_ble_mode_buttons[i],
+                                      s_ble_mode == (ble_ui_mode_t)i ? lv_color_hex(0x2f6f9f) : lv_color_hex(0x94a3b8),
+                                      0);
+        }
+    }
+}
+
+static void ble_key_cb(lv_event_t *e)
+{
+    if (lv_event_get_code(e) != LV_EVENT_CLICKED) {
+        return;
+    }
+
+    bt_hid_key_action_t action = (bt_hid_key_action_t)(intptr_t)lv_event_get_user_data(e);
+    esp_err_t ret = bt_hid_send_key_action(action);
+    if (s_ble_last_label != NULL) {
+        if (ret == ESP_OK) {
+            lv_label_set_text_fmt(s_ble_last_label, "已发送键盘: %s", bt_hid_key_action_name(action));
+        } else {
+            lv_label_set_text_fmt(s_ble_last_label, "未发送: %s", bt_hid_status_text());
+        }
+    }
+    ble_update_status();
+}
+
+static void ble_mouse_cb(lv_event_t *e)
+{
+    if (lv_event_get_code(e) != LV_EVENT_CLICKED) {
+        return;
+    }
+
+    bt_hid_mouse_action_t action = (bt_hid_mouse_action_t)(intptr_t)lv_event_get_user_data(e);
+    esp_err_t ret = bt_hid_send_mouse_action(action);
+    if (s_ble_last_label != NULL) {
+        if (ret == ESP_OK) {
+            lv_label_set_text_fmt(s_ble_last_label, "已发送鼠标: %s", bt_hid_mouse_action_name(action));
+        } else {
+            lv_label_set_text_fmt(s_ble_last_label, "未发送: %s", bt_hid_status_text());
+        }
+    }
+    ble_update_status();
+}
+
+static void ble_rebuild_controls(void)
+{
+    if (s_ble_control_layer == NULL) {
+        return;
+    }
+
+    lv_obj_clean(s_ble_control_layer);
+    switch (s_ble_mode) {
+    case BLE_UI_MODE_MEDIA:
+        ble_create_button(s_ble_control_layer, LV_SYMBOL_PREV, 20, 0,
+                          lv_color_hex(0x4c7bd9), ble_action_cb, (void *)(intptr_t)BT_HID_ACTION_PREV);
+        ble_create_button(s_ble_control_layer, LV_SYMBOL_PLAY " " LV_SYMBOL_PAUSE, 92, 0,
+                          lv_color_hex(0x2fa66a), ble_action_cb, (void *)(intptr_t)BT_HID_ACTION_PLAY_PAUSE);
+        ble_create_button(s_ble_control_layer, LV_SYMBOL_NEXT, 164, 0,
+                          lv_color_hex(0x4c7bd9), ble_action_cb, (void *)(intptr_t)BT_HID_ACTION_NEXT);
+        ble_create_button(s_ble_control_layer, LV_SYMBOL_STOP, 236, 0,
+                          lv_color_hex(0xc05a4a), ble_action_cb, (void *)(intptr_t)BT_HID_ACTION_STOP);
+        ble_create_button(s_ble_control_layer, LV_SYMBOL_VOLUME_MID, 20, 46,
+                          lv_color_hex(0x64748b), ble_action_cb, (void *)(intptr_t)BT_HID_ACTION_VOLUME_DOWN);
+        ble_create_button(s_ble_control_layer, LV_SYMBOL_MUTE, 92, 46,
+                          lv_color_hex(0xc08a34), ble_action_cb, (void *)(intptr_t)BT_HID_ACTION_MUTE);
+        ble_create_button(s_ble_control_layer, LV_SYMBOL_VOLUME_MAX, 164, 46,
+                          lv_color_hex(0x64748b), ble_action_cb, (void *)(intptr_t)BT_HID_ACTION_VOLUME_UP);
+        ble_create_button(s_ble_control_layer, LV_SYMBOL_TRASH, 236, 46,
+                          lv_color_hex(0x6d5bd0), ble_clear_bonds_cb, NULL);
+        break;
+    case BLE_UI_MODE_KEYBOARD:
+        ble_create_button(s_ble_control_layer, "Esc", 20, 0,
+                          lv_color_hex(0xc05a4a), ble_key_cb, (void *)(intptr_t)BT_HID_KEY_ESCAPE);
+        ble_create_button(s_ble_control_layer, LV_SYMBOL_UP, 92, 0,
+                          lv_color_hex(0x4c7bd9), ble_key_cb, (void *)(intptr_t)BT_HID_KEY_UP);
+        ble_create_button(s_ble_control_layer, "Ent", 164, 0,
+                          lv_color_hex(0x2fa66a), ble_key_cb, (void *)(intptr_t)BT_HID_KEY_ENTER);
+        ble_create_button(s_ble_control_layer, "Del", 236, 0,
+                          lv_color_hex(0xc08a34), ble_key_cb, (void *)(intptr_t)BT_HID_KEY_BACKSPACE);
+        ble_create_button(s_ble_control_layer, LV_SYMBOL_LEFT, 20, 46,
+                          lv_color_hex(0x4c7bd9), ble_key_cb, (void *)(intptr_t)BT_HID_KEY_LEFT);
+        ble_create_button(s_ble_control_layer, LV_SYMBOL_DOWN, 92, 46,
+                          lv_color_hex(0x4c7bd9), ble_key_cb, (void *)(intptr_t)BT_HID_KEY_DOWN);
+        ble_create_button(s_ble_control_layer, LV_SYMBOL_RIGHT, 164, 46,
+                          lv_color_hex(0x4c7bd9), ble_key_cb, (void *)(intptr_t)BT_HID_KEY_RIGHT);
+        ble_create_button(s_ble_control_layer, "Sp", 236, 46,
+                          lv_color_hex(0x64748b), ble_key_cb, (void *)(intptr_t)BT_HID_KEY_SPACE);
+        break;
+    case BLE_UI_MODE_MOUSE:
+        ble_create_button(s_ble_control_layer, "L", 20, 0,
+                          lv_color_hex(0x2fa66a), ble_mouse_cb, (void *)(intptr_t)BT_HID_MOUSE_LEFT_CLICK);
+        ble_create_button(s_ble_control_layer, LV_SYMBOL_UP, 92, 0,
+                          lv_color_hex(0x4c7bd9), ble_mouse_cb, (void *)(intptr_t)BT_HID_MOUSE_UP);
+        ble_create_button(s_ble_control_layer, "R", 164, 0,
+                          lv_color_hex(0xc08a34), ble_mouse_cb, (void *)(intptr_t)BT_HID_MOUSE_RIGHT_CLICK);
+        ble_create_button(s_ble_control_layer, LV_SYMBOL_LEFT, 20, 46,
+                          lv_color_hex(0x4c7bd9), ble_mouse_cb, (void *)(intptr_t)BT_HID_MOUSE_LEFT);
+        ble_create_button(s_ble_control_layer, LV_SYMBOL_DOWN, 92, 46,
+                          lv_color_hex(0x4c7bd9), ble_mouse_cb, (void *)(intptr_t)BT_HID_MOUSE_DOWN);
+        ble_create_button(s_ble_control_layer, LV_SYMBOL_RIGHT, 164, 46,
+                          lv_color_hex(0x4c7bd9), ble_mouse_cb, (void *)(intptr_t)BT_HID_MOUSE_RIGHT);
+        ble_create_button(s_ble_control_layer, LV_SYMBOL_TRASH, 236, 46,
+                          lv_color_hex(0x6d5bd0), ble_clear_bonds_cb, NULL);
+        break;
+    }
+}
+
+static void ble_mode_cb(lv_event_t *e)
+{
+    if (lv_event_get_code(e) != LV_EVENT_CLICKED) {
+        return;
+    }
+
+    s_ble_mode = (ble_ui_mode_t)(intptr_t)lv_event_get_user_data(e);
+    if (s_ble_last_label != NULL) {
+        const char *mode = s_ble_mode == BLE_UI_MODE_MEDIA ? "媒体" :
+                           s_ble_mode == BLE_UI_MODE_KEYBOARD ? "键盘" : "鼠标";
+        lv_label_set_text_fmt(s_ble_last_label, "模式: %s", mode);
+    }
+    ble_rebuild_controls();
+    ble_update_mode_buttons();
 }
 
 // 进入蓝牙设置应用
@@ -4077,14 +4323,18 @@ static void btset_event_handler(lv_event_t * e)
 {
     // 创建一个界面对象
     static lv_style_t style;
-    lv_style_init(&style);
-    lv_style_set_radius(&style, 10);  
-    lv_style_set_bg_opa( &style, LV_OPA_COVER );
-    lv_style_set_bg_color(&style, lv_color_hex(0xffffff));
-    lv_style_set_border_width(&style, 0);
-    lv_style_set_pad_all(&style, 0);
-    lv_style_set_width(&style, 320);  
-    lv_style_set_height(&style, 240); 
+    static bool style_ready;
+    if (!style_ready) {
+        lv_style_init(&style);
+        lv_style_set_radius(&style, 0);
+        lv_style_set_bg_opa(&style, LV_OPA_COVER);
+        lv_style_set_bg_color(&style, lv_color_hex(0xf7f8fb));
+        lv_style_set_border_width(&style, 0);
+        lv_style_set_pad_all(&style, 0);
+        lv_style_set_width(&style, 320);
+        lv_style_set_height(&style, 240);
+        style_ready = true;
+    }
 
     icon_in_obj = lv_obj_create(lv_scr_act());
     lv_obj_add_style(icon_in_obj, &style, 0);
@@ -4097,7 +4347,7 @@ static void btset_event_handler(lv_event_t * e)
     lv_obj_set_style_bg_color(ble_title, lv_color_hex(0xb87fa8), 0);
     // 显示标题
     ble_label = lv_label_create(ble_title);
-    lv_label_set_text(ble_label, "蓝牙控制器");
+    lv_label_set_text(ble_label, "BLE遥控器");
     lv_obj_set_style_text_color(ble_label, lv_color_hex(0xffffff), 0); 
     lv_obj_set_style_text_font(ble_label, &font_alipuhui20, 0);
     lv_obj_align(ble_label, LV_ALIGN_CENTER, 0, 0);
@@ -4117,11 +4367,48 @@ static void btset_event_handler(lv_event_t * e)
     lv_obj_set_style_text_color(label_back, lv_color_hex(0xffffff), 0); 
     lv_obj_align(label_back, LV_ALIGN_CENTER, -10, 0);
 
+    s_ble_status_label = lv_label_create(icon_in_obj);
+    lv_obj_set_style_text_font(s_ble_status_label, &font_alipuhui20, 0);
+    lv_obj_set_style_text_color(s_ble_status_label, lv_color_hex(0x243042), 0);
+    lv_obj_align(s_ble_status_label, LV_ALIGN_TOP_LEFT, 12, 48);
+    lv_label_set_text(s_ble_status_label, "状态: 启动中");
+
+    lv_obj_t *device_label = lv_label_create(icon_in_obj);
+    lv_obj_set_width(device_label, 296);
+    lv_label_set_long_mode(device_label, LV_LABEL_LONG_WRAP);
+    lv_label_set_text(device_label, "设备名: SZPI-HID  ·  BLE HID组合设备");
+    lv_obj_set_style_text_font(device_label, &font_alipuhui20, 0);
+    lv_obj_set_style_text_color(device_label, lv_color_hex(0x5f6f86), 0);
+    lv_obj_align(device_label, LV_ALIGN_TOP_LEFT, 12, 72);
+
+    s_ble_mode = BLE_UI_MODE_MEDIA;
+    ble_create_mode_button(icon_in_obj, "媒体", 28, BLE_UI_MODE_MEDIA);
+    ble_create_mode_button(icon_in_obj, "键盘", 121, BLE_UI_MODE_KEYBOARD);
+    ble_create_mode_button(icon_in_obj, "鼠标", 214, BLE_UI_MODE_MOUSE);
+
+    s_ble_control_layer = lv_obj_create(icon_in_obj);
+    lv_obj_set_size(s_ble_control_layer, 320, 84);
+    lv_obj_align(s_ble_control_layer, LV_ALIGN_TOP_LEFT, 0, 124);
+    lv_obj_set_style_bg_opa(s_ble_control_layer, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_width(s_ble_control_layer, 0, 0);
+    lv_obj_set_style_pad_all(s_ble_control_layer, 0, 0);
+    lv_obj_clear_flag(s_ble_control_layer, LV_OBJ_FLAG_SCROLLABLE);
+    ble_rebuild_controls();
+
+    s_ble_last_label = lv_label_create(icon_in_obj);
+    lv_obj_set_width(s_ble_last_label, 296);
+    lv_label_set_long_mode(s_ble_last_label, LV_LABEL_LONG_DOT);
+    lv_label_set_text(s_ble_last_label, "ESP32-S3当前不提供经典A2DP音频");
+    lv_obj_set_style_text_font(s_ble_last_label, &font_alipuhui20, 0);
+    lv_obj_set_style_text_color(s_ble_last_label, lv_color_hex(0x627181), 0);
+    lv_obj_align(s_ble_last_label, LV_ALIGN_TOP_LEFT, 12, 210);
+
     esp_err_t ret = app_hid_ctrl();
     if (ret == ESP_OK) {
-        lv_label_set_text(ble_label, "BLE HID Ready");
+        ble_update_status();
+        s_ble_status_timer = lv_timer_create(ble_status_timer_cb, 500, NULL);
     } else {
-        lv_label_set_text_fmt(ble_label, "BLE失败:%s", esp_err_to_name(ret));
+        lv_label_set_text_fmt(s_ble_status_label, "启动失败: %s", esp_err_to_name(ret));
     }
 
     icon_flag = 6; // 标记已经进入第6个应用
