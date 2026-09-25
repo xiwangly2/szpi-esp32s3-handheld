@@ -14,6 +14,7 @@
 #include "esp_system.h"
 #include "esp_wifi.h"
 #include "esp_event.h"
+#include "esp_err.h"
 #include "esp_log.h"
 #include "nvs_flash.h"
 #include "esp_bt.h"
@@ -64,16 +65,12 @@ static esp_bd_addr_t s_hid_remote_bda;
 static void hidd_event_callback(esp_hidd_cb_event_t event, esp_hidd_cb_param_t *param);
 
 #define HIDD_DEVICE_NAME            "SZPI-HID"
-static uint8_t hidd_service_uuid128[] = {
-    /* LSB <--------------------------------------------------------------------------------> MSB */
-    //first uuid, 16bit, [12],[13] is the value
-    0xfb, 0x34, 0x9b, 0x5f, 0x80, 0x00, 0x00, 0x80, 0x00, 0x10, 0x00, 0x00, 0x12, 0x18, 0x00, 0x00,
-};
+static uint8_t hidd_service_uuid16[] = { 0x12, 0x18 };
 
 static esp_ble_adv_data_t hidd_adv_data = {
     .set_scan_rsp = false,
     .include_name = true,
-    .include_txpower = true,
+    .include_txpower = false,
     .min_interval = 0x0006, //slave connection min interval, Time = min_interval * 1.25 msec
     .max_interval = 0x0010, //slave connection max interval, Time = max_interval * 1.25 msec
     .appearance = 0x03c0,       //HID Generic,
@@ -81,8 +78,8 @@ static esp_ble_adv_data_t hidd_adv_data = {
     .p_manufacturer_data =  NULL,
     .service_data_len = 0,
     .p_service_data = NULL,
-    .service_uuid_len = sizeof(hidd_service_uuid128),
-    .p_service_uuid = hidd_service_uuid128,
+    .service_uuid_len = sizeof(hidd_service_uuid16),
+    .p_service_uuid = hidd_service_uuid16,
     .flag = 0x6,
 };
 
@@ -103,9 +100,16 @@ static void hidd_event_callback(esp_hidd_cb_event_t event, esp_hidd_cb_param_t *
     switch(event) {
         case ESP_HIDD_EVENT_REG_FINISH: {
             if (param->init_finish.state == ESP_HIDD_INIT_OK) {
-                //esp_bd_addr_t rand_addr = {0x04,0x11,0x11,0x11,0x11,0x05};
-                esp_ble_gap_set_device_name(HIDD_DEVICE_NAME);
-                esp_ble_gap_config_adv_data(&hidd_adv_data);
+                esp_err_t ret = esp_ble_gap_set_device_name(HIDD_DEVICE_NAME);
+                if (ret != ESP_OK) {
+                    ESP_LOGE(HID_DEMO_TAG, "set BLE device name failed: %s", esp_err_to_name(ret));
+                }
+                ret = esp_ble_gap_config_adv_data(&hidd_adv_data);
+                if (ret != ESP_OK) {
+                    ESP_LOGE(HID_DEMO_TAG, "config BLE adv data failed: %s", esp_err_to_name(ret));
+                } else {
+                    ESP_LOGI(HID_DEMO_TAG, "BLE HID advertising configured as %s", HIDD_DEVICE_NAME);
+                }
 
             }
             break;
