@@ -65,7 +65,10 @@ static esp_bd_addr_t s_hid_remote_bda;
 static void hidd_event_callback(esp_hidd_cb_event_t event, esp_hidd_cb_param_t *param);
 
 #define HIDD_DEVICE_NAME            "SZPI-HID"
-static uint8_t hidd_service_uuid16[] = { 0x12, 0x18 };
+static uint8_t hidd_service_uuid128[] = {
+    /* ESP-IDF expects 128-bit UUID chunks here and folds SIG-base UUIDs to 16-bit advertising data. */
+    0xfb, 0x34, 0x9b, 0x5f, 0x80, 0x00, 0x00, 0x80, 0x00, 0x10, 0x00, 0x00, 0x12, 0x18, 0x00, 0x00,
+};
 
 static esp_ble_adv_data_t hidd_adv_data = {
     .set_scan_rsp = false,
@@ -78,8 +81,8 @@ static esp_ble_adv_data_t hidd_adv_data = {
     .p_manufacturer_data =  NULL,
     .service_data_len = 0,
     .p_service_data = NULL,
-    .service_uuid_len = sizeof(hidd_service_uuid16),
-    .p_service_uuid = hidd_service_uuid16,
+    .service_uuid_len = sizeof(hidd_service_uuid128),
+    .p_service_uuid = hidd_service_uuid128,
     .flag = 0x6,
 };
 
