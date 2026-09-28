@@ -66,8 +66,10 @@ data partition. Whole-card repartitioning is intentionally left out of the
 touch UI until it can be made harder to trigger by accident.
 
 The advanced USB-ZIP/USB-FDD/HDD boot modes are PC BIOS boot-disk layout
-concepts. The firmware currently reports that distinction in the TF manager
-instead of offering destructive boot-disk partition editing from the device UI.
+concepts. The TF manager reports the actual mounted layout: MBR, GPT, or SFD
+(no partition table), together with the volume start LBA and cluster size.
+Free space is displayed when FatFs already has a valid count; opening card
+information does not trigger a potentially slow full FAT scan.
 
 Music scanning checks:
 
@@ -107,6 +109,20 @@ The WLAN UI reuses the shared WiFi driver instead of repeatedly tearing it down.
 Open networks connect without a password prompt. Successful network credentials
 are persisted to device NVS and, when a TF card is present, to TF card history.
 The currently connected network is also synced to the random image app config.
+
+## Device Storage
+
+The third launcher page includes `本机存储`. This read-only view works without
+a TF card and displays the detected Flash size, partition labels and offsets,
+NVS entry usage, and current internal-heap/PSRAM availability. The refresh icon
+updates these values. Configuration values and passwords are not displayed.
+
+With the current 16 MiB Flash layout, `factory` reserves 12 MiB for firmware and
+`storage` reserves 3 MiB for a future local filesystem. The latter is not yet
+mounted or usable as a file browser; it is explicitly shown as reserved. The
+space outside named partitions includes bootloader/partition-table space and
+must not be interpreted as available file storage. PSRAM is volatile memory.
+Formatting the TF card does not erase NVS WLAN history or Bluetooth bonds.
 
 ## Bluetooth
 

@@ -1,0 +1,13 @@
+cmake_minimum_required(VERSION 3.16)
+project(storage_layout_tests C)
+enable_testing()
+add_executable(storage_layout_tests test_sdcard_layout.c
+    ../../firmware/handheld/main/sdcard_layout.c)
+target_include_directories(storage_layout_tests PRIVATE ../../firmware/handheld/main)
+set_property(TARGET storage_layout_tests PROPERTY C_STANDARD 11)
+if(MSVC)
+    target_compile_options(storage_layout_tests PRIVATE /W4 /WX /UNDEBUG)
+else()
+    target_compile_options(storage_layout_tests PRIVATE -Wall -Wextra -Werror -UNDEBUG)
+endif()
+add_test(NAME storage_layout COMMAND storage_layout_tests)

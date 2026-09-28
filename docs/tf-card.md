@@ -82,6 +82,23 @@ table style, and the first few partition entries:
 - MBR
 - raw FAT/superfloppy with no partition table
 
+The mounted volume's actual start LBA determines whether a card is a
+superfloppy (SFD, LBA 0). Boot code in that volume is never interpreted as MBR
+entries. MBR entries are checked for valid status and card bounds before they
+are displayed. The manager also reports the volume data capacity, sector and
+cluster sizes, and free space when FatFs has a valid cached count. It does not
+scan the entire FAT just to open the information page.
+
+Both single-partition **MBR + FAT32** and **SFD + FAT32** are supported. A PC
+formatter's `USB-FDD` preset is not itself a partition-table type: inspect
+`分区表` and `卷起始 LBA` in the TF manager for the actual result. Formatting a
+card with one of these layouts does not turn the handheld into a USB disk.
+
+The separate `本机存储` launcher entry displays on-board Flash and NVS metadata
+without a TF card. The 3 MiB `storage` Flash partition is currently reserved,
+not an initialized user filesystem. WLAN history in NVS survives TF formatting;
+the TF copy and cached media on the formatted volume do not.
+
 It can quick-format the currently mounted volume. Use `FS` to choose:
 
 - `Auto`: FatFs chooses a suitable FAT/exFAT variant

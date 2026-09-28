@@ -795,42 +795,18 @@ static void bsp_sdcard_parse_gpt_name(const uint8_t *entry, char *out, size_t ou
     }
 }
 
-static bool bsp_sdcard_sector_has_fat_signature(const uint8_t *sector)
-{
-    return memcmp(sector + 3, "EXFAT   ", 8) == 0 ||
-           memcmp(sector + 54, "FAT", 3) == 0 ||
-           memcmp(sector + 82, "FAT32", 5) == 0;
-}
-
 static void bsp_sdcard_scan_mbr(const uint8_t *sector, bsp_sdcard_info_t *info)
 {
-    uint8_t count = 0;
-
-    for (uint8_t i = 0; i < BSP_SDCARD_MAX_PARTITIONS; i++) {
-        const uint8_t *entry = sector + 446 + (i * 16);
-        uint8_t type = entry[4];
-        uint32_t first_lba = bsp_rd32(entry + 8);
-        uint32_t sectors = bsp_rd32(entry + 12);
-        if (type == 0 || sectors == 0) {
-            continue;
-        }
-
-        bsp_sdcard_partition_info_t *part = &info->partitions[count++];
-        part->valid = true;
-        part->bootable = entry[0] == 0x80;
-        part->index = i + 1;
-        part->mbr_type = type;
-        part->first_lba = first_lba;
-        part->sectors = sectors;
-        part->last_lba = first_lba + (uint64_t)sectors - 1;
-        snprintf(part->name, sizeof(part->name), "%s", bsp_sdcard_mbr_type_name(type));
+    uint8_t count = sdcard_parse_mbr(sector, info->card_sectors, info->volume_start_lba,
+                                     info->partitions);
+    for (uint8_t i = 0; i < count; i++) {
+        bsp_sdcard_partition_info_t *part = &info->partitions[i];
+        snprintf(part->name, sizeof(part->name), "%s", bsp_sdcard_mbr_type_name(part->mbr_type));
     }
 
     if (count > 0) {
         info->table_type = BSP_SDCARD_TABLE_MBR;
         info->partition_count = count;
-    } else if (bsp_sdcard_sector_has_fat_signature(sector)) {
-        info->table_type = BSP_SDCARD_TABLE_NONE;
     }
 }
 
@@ -854,7 +830,8 @@ static esp_err_t bsp_sdcard_scan_gpt(uint32_t sector_size, bsp_sdcard_info_t *in
     uint64_t entries_lba = bsp_rd64(sector + 72);
     uint32_t entry_count = bsp_rd32(sector + 80);
     uint32_t entry_size = bsp_rd32(sector + 84);
-    if (entry_size < 128 || entry_size > sector_size || entries_lba == 0) {
+    if (entry_size < 128 || entry_size > sector_size || sector_size % entry_size != 0 ||
+        entries_lba == 0 || entries_lba >= info->card_sectors) {
         free(sector);
         return ESP_ERR_INVALID_RESPONSE;
     }
@@ -866,9 +843,14 @@ static esp_err_t bsp_sdcard_scan_gpt(uint32_t sector_size, bsp_sdcard_info_t *in
         uint64_t byte_offset = (uint64_t)i * entry_size;
         uint64_t lba = entries_lba + (byte_offset / sector_size);
         uint32_t offset = byte_offset % sector_size;
+        if (lba >= info->card_sectors) {
+            free(sector);
+            return ESP_ERR_INVALID_RESPONSE;
+        }
         ret = sdmmc_read_sectors(sdmmc_card, sector, lba, 1);
         if (ret != ESP_OK) {
-            break;
+            free(sector);
+            return ret;
         }
 
         const uint8_t *entry = sector + offset;
@@ -885,7 +867,7 @@ static esp_err_t bsp_sdcard_scan_gpt(uint32_t sector_size, bsp_sdcard_info_t *in
 
         uint64_t first_lba = bsp_rd64(entry + 32);
         uint64_t last_lba = bsp_rd64(entry + 40);
-        if (first_lba == 0 || last_lba < first_lba) {
+        if (first_lba == 0 || last_lba < first_lba || last_lba >= info->card_sectors) {
             continue;
         }
 
@@ -903,7 +885,7 @@ static esp_err_t bsp_sdcard_scan_gpt(uint32_t sector_size, bsp_sdcard_info_t *in
     return ESP_OK;
 }
 
-esp_err_t bsp_sdcard_get_info(bsp_sdcard_info_t *info)
+static esp_err_t bsp_sdcard_read_info(bsp_sdcard_info_t *info)
 {
     if (info == NULL) {
         return ESP_ERR_INVALID_ARG;
@@ -912,7 +894,6 @@ esp_err_t bsp_sdcard_get_info(bsp_sdcard_info_t *info)
     info->table_type = BSP_SDCARD_TABLE_UNKNOWN;
     snprintf(info->filesystem, sizeof(info->filesystem), "unknown");
 
-    ESP_RETURN_ON_ERROR(bsp_sdcard_mount(), TAG, "mount sdcard before info failed");
     if (sdmmc_card == NULL) {
         return ESP_ERR_INVALID_STATE;
     }
@@ -926,9 +907,25 @@ esp_err_t bsp_sdcard_get_info(bsp_sdcard_info_t *info)
     info->card_bytes = info->card_sectors * info->sector_size;
 
     vfs_fat_sd_ctx_t *ctx = get_vfs_fat_get_sd_ctx(sdmmc_card);
-    if (ctx != NULL && ctx->fs != NULL) {
-        snprintf(info->filesystem, sizeof(info->filesystem), "%s",
-                 bsp_sdcard_fs_type_name(ctx->fs->fs_type));
+    if (ctx == NULL || ctx->fs == NULL) {
+        return ESP_ERR_INVALID_STATE;
+    }
+    snprintf(info->filesystem, sizeof(info->filesystem), "%s",
+             bsp_sdcard_fs_type_name(ctx->fs->fs_type));
+    info->volume_start_lba = ctx->fs->volbase;
+    info->cluster_bytes = (uint32_t)ctx->fs->csize * info->sector_size;
+    if (ctx->fs->n_fatent >= 2) {
+        uint32_t clusters = ctx->fs->n_fatent - 2;
+        info->volume_bytes = (uint64_t)clusters * info->cluster_bytes;
+        /* Use FatFs' known count; do not block card info on a full FAT scan. */
+        if (ctx->fs->free_clst <= clusters) {
+            info->free_bytes = (uint64_t)ctx->fs->free_clst * info->cluster_bytes;
+            info->free_bytes_valid = true;
+        }
+    }
+    if (ctx->fs->volbase == 0) {
+        info->table_type = BSP_SDCARD_TABLE_NONE;
+        return ESP_OK;
     }
 
     uint8_t *sector = calloc(1, info->sector_size);
@@ -955,15 +952,23 @@ esp_err_t bsp_sdcard_get_info(bsp_sdcard_info_t *info)
             free(sector);
             return ESP_OK;
         }
+        info->table_type = BSP_SDCARD_TABLE_UNKNOWN;
+        info->partition_count = 0;
         bsp_sdcard_scan_mbr(sector, info);
-    }
-
-    if (info->table_type == BSP_SDCARD_TABLE_UNKNOWN && bsp_sdcard_sector_has_fat_signature(sector)) {
-        info->table_type = BSP_SDCARD_TABLE_NONE;
     }
 
     free(sector);
     return ESP_OK;
+}
+
+esp_err_t bsp_sdcard_get_info(bsp_sdcard_info_t *info)
+{
+    if (info == NULL) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    memset(info, 0, sizeof(*info));
+    ESP_RETURN_ON_ERROR(bsp_sdcard_mount(), TAG, "mount sdcard before info failed");
+    return bsp_sdcard_read_info(info);
 }
 
 static uint8_t bsp_sdcard_find_partition_for_lba(const bsp_sdcard_info_t *info, uint64_t volbase)
@@ -1104,7 +1109,21 @@ static esp_err_t bsp_sdcard_mount_internal(bool format_if_mount_failed)
     ESP_LOGI(TAG, "Mounting filesystem Starting");
 
     esp_err_t ret = esp_vfs_fat_sdmmc_mount(SD_MOUNT_POINT, &sdmmc_host, &slot_config, &mount_config, &sdmmc_card);
-
+    if (ret == ESP_OK) {
+        bsp_sdcard_info_t info;
+        esp_err_t info_ret = bsp_sdcard_read_info(&info);
+        if (info_ret == ESP_OK) {
+            const char *table = info.table_type == BSP_SDCARD_TABLE_NONE ? "SFD (no partition table)" :
+                                info.table_type == BSP_SDCARD_TABLE_MBR ? "MBR" :
+                                info.table_type == BSP_SDCARD_TABLE_GPT ? "GPT" : "unknown";
+            ESP_LOGI(TAG, "SD mounted: fs=%s table=%s card=%llu volume=%llu LBA=%llu cluster=%lu",
+                     info.filesystem, table, (unsigned long long)info.card_bytes,
+                     (unsigned long long)info.volume_bytes, (unsigned long long)info.volume_start_lba,
+                     (unsigned long)info.cluster_bytes);
+        } else {
+            ESP_LOGW(TAG, "SD mounted; partition info unavailable: %s", esp_err_to_name(info_ret));
+        }
+    }
     return ret;
 }
 

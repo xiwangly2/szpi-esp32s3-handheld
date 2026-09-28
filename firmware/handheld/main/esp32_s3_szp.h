@@ -259,7 +259,7 @@ void app_camera_lcd(void);
 #define SD_DAT0_IO     (21)
 
 #define SD_MOUNT_POINT     "/sdcard"
-#define BSP_SDCARD_MAX_PARTITIONS 4
+#include "sdcard_layout.h"
 
 typedef enum {
     BSP_SDCARD_FORMAT_AUTO = 0,
@@ -275,21 +275,15 @@ typedef enum {
 } bsp_sdcard_table_t;
 
 typedef struct {
-    bool valid;
-    bool bootable;
-    uint8_t index;
-    uint8_t mbr_type;
-    uint64_t first_lba;
-    uint64_t last_lba;
-    uint64_t sectors;
-    char name[32];
-} bsp_sdcard_partition_info_t;
-
-typedef struct {
     bool mounted;
     uint32_t sector_size;
     uint64_t card_sectors;
     uint64_t card_bytes;
+    uint64_t volume_start_lba;
+    uint64_t volume_bytes;
+    uint64_t free_bytes;
+    uint32_t cluster_bytes;
+    bool free_bytes_valid;
     char filesystem[12];
     bsp_sdcard_table_t table_type;
     uint8_t partition_count;

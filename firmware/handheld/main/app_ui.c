@@ -2,6 +2,8 @@
 #include "audio_player.h"
 #include "esp32_s3_szp.h"
 #include "random_image_app.h"
+#include "device_storage.h"
+#include "esp_partition.h"
 #include "file_iterator.h"
 #include "string.h"
 #include <dirent.h>
@@ -21,6 +23,7 @@
 #include <stdlib.h>
 #include <ctype.h>
 #include <stdint.h>
+#include <stdarg.h>
 #include <sys/stat.h>
 #include <time.h>
 #include <sys/time.h>
@@ -1254,7 +1257,7 @@ static const char *sd_partition_table_name(bsp_sdcard_table_t table_type)
 {
     switch (table_type) {
     case BSP_SDCARD_TABLE_NONE:
-        return "No PT";
+        return "无 (SFD)";
     case BSP_SDCARD_TABLE_MBR:
         return "MBR";
     case BSP_SDCARD_TABLE_GPT:
@@ -1844,17 +1847,28 @@ static void sdmgr_build_info_text(char *out, size_t out_len, const bsp_sdcard_in
     }
 
     char card_size[24];
+    char volume_size[24];
     sd_format_bytes_u64(card_size, sizeof(card_size), info->card_bytes);
+    sd_format_bytes_u64(volume_size, sizeof(volume_size), info->volume_bytes);
     int used = snprintf(out, out_len,
-                        "容量: %s  扇区:%luB\n挂载: %s  分区表:%s  分区:%u\n",
+                        "卡容量: %s\n文件系统: %s\n分区表: %s  分区:%u\n数据区: %s\n扇区:%luB  簇:%luB\n卷起始 LBA: %llu\n",
                         card_size,
-                        (unsigned long)info->sector_size,
                         info->filesystem,
                         sd_partition_table_name(info->table_type),
-                        (unsigned)info->partition_count);
+                        (unsigned)info->partition_count,
+                        volume_size,
+                        (unsigned long)info->sector_size,
+                        (unsigned long)info->cluster_bytes,
+                        (unsigned long long)info->volume_start_lba);
 
     if (used < 0 || used >= (int)out_len) {
         return;
+    }
+
+    if (info->free_bytes_valid) {
+        char free_size[24];
+        sd_format_bytes_u64(free_size, sizeof(free_size), info->free_bytes);
+        used += snprintf(out + used, out_len - used, "可用: %s\n", free_size);
     }
 
     for (uint8_t i = 0; i < info->partition_count && used < (int)out_len - 1; i++) {
@@ -1873,13 +1887,8 @@ static void sdmgr_build_info_text(char *out, size_t out_len, const bsp_sdcard_in
                          (unsigned long long)part->last_lba);
     }
 
-    if (info->partition_count == 0 && used < (int)out_len - 1) {
-        used += snprintf(out + used, out_len - used, "未发现分区条目，可能是裸FAT卷。\n");
-    }
-
-    if (used < (int)out_len - 1) {
-        snprintf(out + used, out_len - used,
-                 "\n高级: USB-ZIP/FDD/HDD 属于PC BIOS启动盘布局；本机当前作为TF数据卡使用。多分区可识别，挂载切换待实现。");
+    if (info->table_type == BSP_SDCARD_TABLE_NONE && used < (int)out_len - 1) {
+        snprintf(out + used, out_len - used, "整卡卷，无分区表\n当前卷已挂载");
     }
 }
 
@@ -2574,6 +2583,142 @@ static void sdmgr_event_handler(lv_event_t *e)
 }
 
 
+
+static lv_obj_t *s_local_storage_label;
+
+static void storage_text_append(char *out, size_t capacity, const char *format, ...)
+{
+    size_t used = strlen(out);
+    if (used >= capacity - 1) {
+        return;
+    }
+    va_list args;
+    va_start(args, format);
+    vsnprintf(out + used, capacity - used, format, args);
+    va_end(args);
+}
+
+static const char *storage_partition_usage(const device_storage_partition_t *part)
+{
+    if (part->type == ESP_PARTITION_TYPE_APP) {
+        return "固件";
+    }
+    if (part->subtype == ESP_PARTITION_SUBTYPE_DATA_NVS) {
+        return "配置";
+    }
+    if (part->subtype == ESP_PARTITION_SUBTYPE_DATA_SPIFFS) {
+        return "预留文件区";
+    }
+    return "系统";
+}
+
+static void local_storage_refresh_cb(lv_event_t *e)
+{
+    (void)e;
+    if (s_local_storage_label == NULL) {
+        return;
+    }
+    device_storage_info_t info;
+    esp_err_t ret = device_storage_get_info(&info);
+    if (ret != ESP_OK) {
+        lv_label_set_text_fmt(s_local_storage_label, "读取失败: %s", esp_err_to_name(ret));
+        return;
+    }
+
+    const size_t text_capacity = 1536;
+    char *text = heap_caps_calloc(1, text_capacity, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (text == NULL) {
+        lv_label_set_text(s_local_storage_label, "内存不足，请稍后刷新");
+        return;
+    }
+    char total[24];
+    char free_size[24];
+    sd_format_bytes_u64(total, sizeof(total), info.flash_bytes);
+    storage_text_append(text, text_capacity, "板载 Flash: %s\n\n", total);
+    for (size_t i = 0; i < info.partition_count; i++) {
+        const device_storage_partition_t *part = &info.partitions[i];
+        sd_format_bytes_u64(total, sizeof(total), part->size);
+        storage_text_append(text, text_capacity, "%s (%s)\n%s  @0x%06lx\n",
+                            part->label, storage_partition_usage(part), total,
+                            (unsigned long)part->address);
+        if (part->type == ESP_PARTITION_TYPE_DATA && part->subtype == ESP_PARTITION_SUBTYPE_DATA_SPIFFS) {
+            storage_text_append(text, text_capacity, "文件系统尚未启用\n");
+        }
+        storage_text_append(text, text_capacity, "\n");
+    }
+    if (info.flash_bytes >= info.partition_bytes) {
+        sd_format_bytes_u64(total, sizeof(total), info.flash_bytes - info.partition_bytes);
+        storage_text_append(text, text_capacity, "分区外: %s\n含引导区和保留空间\n\n", total);
+    }
+    if (info.nvs_result == ESP_OK) {
+        storage_text_append(text, text_capacity, "NVS 配置\n已用 %u / 共 %u 条目\n可用 %u 条目\nWLAN / 蓝牙绑定等\n\n",
+                            (unsigned)info.nvs.used_entries, (unsigned)info.nvs.total_entries,
+                            (unsigned)info.nvs.available_entries);
+    } else {
+        storage_text_append(text, text_capacity, "NVS: %s\n\n", esp_err_to_name(info.nvs_result));
+    }
+    sd_format_bytes_u64(total, sizeof(total), info.psram_total);
+    sd_format_bytes_u64(free_size, sizeof(free_size), info.psram_free);
+    storage_text_append(text, text_capacity, "PSRAM: %s\n可用: %s\n", total, free_size);
+    sd_format_bytes_u64(total, sizeof(total), info.dram_total);
+    sd_format_bytes_u64(free_size, sizeof(free_size), info.dram_free);
+    storage_text_append(text, text_capacity, "内部堆: %s\n可用: %s\n运行内存，断电不保留", total, free_size);
+    lv_label_set_text(s_local_storage_label, text);
+    free(text);
+}
+
+static void local_storage_back_cb(lv_event_t *e)
+{
+    (void)e;
+    s_local_storage_label = NULL;
+    lv_obj_del(icon_in_obj);
+    icon_in_obj = NULL;
+    icon_flag = 0;
+}
+
+static void local_storage_event_handler(lv_event_t *e)
+{
+    (void)e;
+    icon_in_obj = lv_obj_create(lv_scr_act());
+    lv_obj_set_size(icon_in_obj, 320, 240);
+    lv_obj_set_style_pad_all(icon_in_obj, 0, 0);
+    lv_obj_set_style_border_width(icon_in_obj, 0, 0);
+    lv_obj_set_style_radius(icon_in_obj, 0, 0);
+    lv_obj_set_style_bg_color(icon_in_obj, lv_color_hex(0xf4f6f5), 0);
+    lv_obj_clear_flag(icon_in_obj, LV_OBJ_FLAG_SCROLLABLE);
+
+    lv_obj_t *bar = lv_obj_create(icon_in_obj);
+    lv_obj_set_size(bar, 320, 40);
+    lv_obj_set_style_pad_all(bar, 0, 0);
+    lv_obj_set_style_border_width(bar, 0, 0);
+    lv_obj_set_style_radius(bar, 0, 0);
+    lv_obj_set_style_bg_color(bar, lv_color_hex(0x176b78), 0);
+    lv_obj_clear_flag(bar, LV_OBJ_FLAG_SCROLLABLE);
+
+    lv_obj_t *title = lv_label_create(bar);
+    lv_label_set_text(title, "本机存储");
+    lv_obj_set_style_text_font(title, &font_alipuhui20, 0);
+    lv_obj_set_style_text_color(title, lv_color_hex(0xffffff), 0);
+    lv_obj_center(title);
+    sdmgr_create_button(bar, LV_SYMBOL_LEFT, 4, 4, 44, lv_color_hex(0x176b78), local_storage_back_cb);
+    sdmgr_create_button(bar, LV_SYMBOL_REFRESH, 272, 4, 44, lv_color_hex(0x176b78), local_storage_refresh_cb);
+
+    lv_obj_t *body = lv_obj_create(icon_in_obj);
+    lv_obj_set_size(body, 320, 200);
+    lv_obj_set_pos(body, 0, 40);
+    lv_obj_set_style_border_width(body, 0, 0);
+    lv_obj_set_style_radius(body, 0, 0);
+    lv_obj_set_style_pad_all(body, 10, 0);
+    lv_obj_set_style_bg_opa(body, LV_OPA_TRANSP, 0);
+    lv_obj_set_scroll_dir(body, LV_DIR_VER);
+    s_local_storage_label = lv_label_create(body);
+    lv_obj_set_width(s_local_storage_label, 292);
+    lv_label_set_long_mode(s_local_storage_label, LV_LABEL_LONG_WRAP);
+    lv_obj_set_style_text_font(s_local_storage_label, &font_alipuhui20, 0);
+    lv_obj_set_style_text_color(s_local_storage_label, lv_color_hex(0x202a2c), 0);
+    icon_flag = 11;
+    local_storage_refresh_cb(NULL);
+}
 
 /******************************** 第4个图标 摄像头 应用程序 *****************************************************************************/
 lv_obj_t * img_camera;
@@ -5523,6 +5668,7 @@ static const home_app_item_t s_home_apps[] = {
     { "摄像头", "Camera", 0xd8a318, HOME_ICON_IMAGE,  &img_camera_icon,  camera_event_handler },
     { "WLAN",   "Scan",   0xc85a5a, HOME_ICON_IMAGE,  &img_wifiset_icon, wifiset_event_handler },
     { "蓝牙",   "HID",    0xa36bb8, HOME_ICON_IMAGE,  &img_btset_icon,   btset_event_handler },
+    { "本机存储", "Flash", 0x397d61, HOME_ICON_IMAGE, &img_sd_icon,      local_storage_event_handler },
 };
 
 static uint8_t home_page_count(void)

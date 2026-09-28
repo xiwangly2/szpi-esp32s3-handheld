@@ -1,4 +1,5 @@
 idf_component_register(SRCS "esp32_s3_szp.c" "main.c" "app_ui.c" "random_image_app.c"
+                       SRCS "device_storage.c" "sdcard_layout.c"
                        SRCS "assets/img_att_icon.c"
                        SRCS "assets/img_btset_icon.c"
                        SRCS "assets/img_camera_icon.c"

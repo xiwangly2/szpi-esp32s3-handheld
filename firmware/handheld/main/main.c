@@ -2,6 +2,7 @@
 #include "esp32_s3_szp.h"
 #include "app_ui.h"
 #include "nvs_flash.h"
+#include "device_storage.h"
 #include <esp_system.h>
 
 
@@ -39,6 +40,7 @@ void app_main(void)
         ret = nvs_flash_init();
     }
     ESP_ERROR_CHECK( ret );
+    device_storage_log_info();
 
     bsp_i2c_init();  // I2C初始化
     pca9557_init();  // IO扩展芯片初始化
