@@ -58,6 +58,10 @@ typedef struct {
     const char *progress_prefix;
 } http_buffer_t;
 
+typedef struct {
+    uint32_t generation;
+} random_fetch_req_t;
+
 static const char *TAG = "random_lvgl";
 
 LV_FONT_DECLARE(font_alipuhui20);
@@ -72,11 +76,13 @@ static lv_img_dsc_t s_image_dsc;
 static uint8_t *s_image_buf;
 static bool s_chrome_visible = true;
 static bool s_status_loading;
+static volatile uint32_t s_page_generation;
 
 static EventGroupHandle_t s_wifi_event_group;
 static bool s_wifi_started;
 static int s_retry_num;
 static volatile bool s_fetching;
+static volatile bool s_refresh_pending;
 static bool s_button_task_started;
 
 static char s_wifi_ssid[33] = CONFIG_RANDOM_IMAGE_WIFI_SSID;
@@ -84,6 +90,11 @@ static char s_wifi_password[65] = CONFIG_RANDOM_IMAGE_WIFI_PASSWORD;
 static char s_api_url[256] = CONFIG_RANDOM_IMAGE_API_URL;
 
 static void random_image_start_refresh(void);
+
+static bool random_generation_active(uint32_t generation)
+{
+    return s_page != NULL && generation == s_page_generation;
+}
 
 static void log_random_heap(const char *stage)
 {
@@ -309,15 +320,20 @@ static void ui_apply_chrome_state(void)
     }
 }
 
-static void ui_set_status_locked(const char *text, bool loading)
+static bool ui_set_status_locked_for_generation(uint32_t generation, const char *text, bool loading)
 {
     lvgl_port_lock(0);
+    if (!random_generation_active(generation)) {
+        lvgl_port_unlock();
+        return false;
+    }
     s_status_loading = loading;
     if (s_page != NULL && s_status_label != NULL) {
         lv_label_set_text(s_status_label, text);
     }
     ui_apply_chrome_state();
     lvgl_port_unlock();
+    return true;
 }
 
 static void ui_set_status_unlocked(const char *text, bool loading)
@@ -329,10 +345,10 @@ static void ui_set_status_unlocked(const char *text, bool loading)
     ui_apply_chrome_state();
 }
 
-static void ui_show_image_locked(uint16_t *canvas)
+static bool ui_show_image_locked_for_generation(uint16_t *canvas, uint32_t generation)
 {
     lvgl_port_lock(0);
-    if (s_page != NULL && s_image != NULL) {
+    if (random_generation_active(generation) && s_image != NULL) {
         uint8_t *old_buf = s_image_buf;
         lv_img_set_src(s_image, NULL);
 
@@ -356,10 +372,13 @@ static void ui_show_image_locked(uint16_t *canvas)
         if (old_buf != NULL) {
             heap_caps_free(old_buf);
         }
+        lvgl_port_unlock();
+        return true;
     } else {
         heap_caps_free(canvas);
     }
     lvgl_port_unlock();
+    return false;
 }
 
 static void wifi_event_handler(void *arg, esp_event_base_t event_base, int32_t event_id, void *event_data)
@@ -501,7 +520,7 @@ static esp_err_t append_http_data(http_buffer_t *buf, const uint8_t *data, size_
     return ESP_OK;
 }
 
-static void update_download_progress(http_buffer_t *buf)
+static void update_download_progress(http_buffer_t *buf, uint32_t generation)
 {
     int64_t now_us = esp_timer_get_time();
     if (buf->progress_prefix == NULL ||
@@ -511,14 +530,18 @@ static void update_download_progress(http_buffer_t *buf)
 
     char text[32];
     snprintf(text, sizeof(text), "%s %u KB", buf->progress_prefix, (unsigned)(buf->len / 1024));
-    ui_set_status_locked(text, true);
+    ui_set_status_locked_for_generation(generation, text, true);
     buf->last_progress_us = now_us;
     buf->last_progress_len = buf->len;
 }
 
 static esp_err_t http_get_to_buffer(const char *url, size_t max_len, const char *progress_prefix,
-                                    int total_timeout_ms, http_buffer_t *out)
+                                    int total_timeout_ms, uint32_t generation, http_buffer_t *out)
 {
+    if (!random_generation_active(generation)) {
+        return ESP_ERR_INVALID_STATE;
+    }
+
     memset(out, 0, sizeof(*out));
     out->max_len = max_len;
     out->total_timeout_ms = total_timeout_ms;
@@ -547,6 +570,11 @@ static esp_err_t http_get_to_buffer(const char *url, size_t max_len, const char 
     esp_http_client_set_header(client, "Accept-Encoding", "identity");
     esp_http_client_set_header(client, "Connection", "close");
 
+    if (!random_generation_active(generation)) {
+        esp_http_client_cleanup(client);
+        return ESP_ERR_INVALID_STATE;
+    }
+
     esp_err_t ret = esp_http_client_open(client, 0);
     if (ret != ESP_OK) {
         esp_http_client_cleanup(client);
@@ -573,6 +601,11 @@ static esp_err_t http_get_to_buffer(const char *url, size_t max_len, const char 
     }
 
     while (true) {
+        if (!random_generation_active(generation)) {
+            ret = ESP_ERR_INVALID_STATE;
+            goto cleanup;
+        }
+
         int64_t now_us = esp_timer_get_time();
         if (total_timeout_ms > 0 && now_us - out->start_us > (int64_t)total_timeout_ms * 1000) {
             ret = ESP_ERR_TIMEOUT;
@@ -601,7 +634,7 @@ static esp_err_t http_get_to_buffer(const char *url, size_t max_len, const char 
         if (ret != ESP_OK) {
             goto cleanup;
         }
-        update_download_progress(out);
+        update_download_progress(out, generation);
 
         if (content_len > 0 && out->len >= (size_t)content_len) {
             ret = ESP_OK;
@@ -664,8 +697,12 @@ static uint16_t *center_crop_canvas(const uint16_t *pixels, int width, int heigh
     return canvas;
 }
 
-static esp_err_t decode_jpeg_to_lvgl(const http_buffer_t *jpeg)
+static esp_err_t decode_jpeg_to_lvgl(const http_buffer_t *jpeg, uint32_t generation)
 {
+    if (!random_generation_active(generation)) {
+        return ESP_ERR_INVALID_STATE;
+    }
+
     log_random_heap("before jpeg decode");
     esp_jpeg_image_cfg_t info_cfg = {
         .indata = jpeg->data,
@@ -678,11 +715,13 @@ static esp_err_t decode_jpeg_to_lvgl(const http_buffer_t *jpeg)
     };
     esp_jpeg_image_output_t original = { 0 };
     ESP_RETURN_ON_ERROR(esp_jpeg_get_image_info(&info_cfg, &original), TAG, "read jpeg info failed");
+    ESP_RETURN_ON_FALSE(random_generation_active(generation), ESP_ERR_INVALID_STATE, TAG, "jpeg decode cancelled");
 
     info_cfg.out_scale = choose_jpeg_scale(original.width, original.height);
 
     esp_jpeg_image_output_t outimg = { 0 };
     ESP_RETURN_ON_ERROR(esp_jpeg_get_image_info(&info_cfg, &outimg), TAG, "read scaled jpeg info failed");
+    ESP_RETURN_ON_FALSE(random_generation_active(generation), ESP_ERR_INVALID_STATE, TAG, "jpeg decode cancelled");
 
     uint16_t *decoded = heap_caps_malloc(outimg.output_len, MALLOC_CAP_8BIT | MALLOC_CAP_SPIRAM);
     ESP_RETURN_ON_FALSE(decoded != NULL, ESP_ERR_NO_MEM, TAG, "no memory for decoded image");
@@ -693,23 +732,34 @@ static esp_err_t decode_jpeg_to_lvgl(const http_buffer_t *jpeg)
 
     esp_err_t ret = esp_jpeg_decode(&jpeg_cfg, &outimg);
     if (ret == ESP_OK) {
+        if (!random_generation_active(generation)) {
+            ret = ESP_ERR_INVALID_STATE;
+            goto cleanup;
+        }
         ESP_LOGI(TAG, "decoded image %dx%d -> %dx%d, %u bytes",
                  original.width, original.height, outimg.width, outimg.height, (unsigned)outimg.output_len);
         uint16_t *canvas = center_crop_canvas(decoded, outimg.width, outimg.height);
         if (canvas == NULL) {
             ret = ESP_ERR_NO_MEM;
         } else {
-            ui_show_image_locked(canvas);
+            if (!ui_show_image_locked_for_generation(canvas, generation)) {
+                ret = ESP_ERR_INVALID_STATE;
+            }
         }
     }
 
+cleanup:
     heap_caps_free(decoded);
     log_random_heap("after jpeg decode");
     return ret;
 }
 
-static esp_err_t show_cached_image_from_path(const char *path, const char *source_name)
+static esp_err_t show_cached_image_from_path(const char *path, const char *source_name, uint32_t generation)
 {
+    if (!random_generation_active(generation)) {
+        return ESP_ERR_INVALID_STATE;
+    }
+
     http_buffer_t cached = { 0 };
     esp_err_t ret = read_file_to_buffer(path, CONFIG_RANDOM_IMAGE_MAX_JPEG_KB * 1024, &cached);
     if (ret != ESP_OK) {
@@ -718,23 +768,29 @@ static esp_err_t show_cached_image_from_path(const char *path, const char *sourc
 
     char status[40];
     snprintf(status, sizeof(status), "Decode %s cache", source_name);
-    ui_set_status_locked(status, true);
-    ret = decode_jpeg_to_lvgl(&cached);
+    ui_set_status_locked_for_generation(generation, status, true);
+    ret = decode_jpeg_to_lvgl(&cached, generation);
     heap_caps_free(cached.data);
     return ret;
 }
 
-static esp_err_t show_cached_image(void)
+static esp_err_t show_cached_image(uint32_t generation)
 {
     esp_err_t last_ret = ESP_ERR_NOT_FOUND;
+    if (!random_generation_active(generation)) {
+        return ESP_ERR_INVALID_STATE;
+    }
     if (sdcard_prepare()) {
-        last_ret = show_cached_image_from_path(SD_RANDOM_LATEST_PATH, "TF");
+        last_ret = show_cached_image_from_path(SD_RANDOM_LATEST_PATH, "TF", generation);
         if (last_ret == ESP_OK) {
             return ESP_OK;
         }
     }
+    if (!random_generation_active(generation)) {
+        return ESP_ERR_INVALID_STATE;
+    }
     if (local_storage_prepare()) {
-        last_ret = show_cached_image_from_path(LOCAL_RANDOM_LATEST_PATH, "local");
+        last_ret = show_cached_image_from_path(LOCAL_RANDOM_LATEST_PATH, "local", generation);
         if (last_ret == ESP_OK) {
             return ESP_OK;
         }
@@ -742,17 +798,24 @@ static esp_err_t show_cached_image(void)
     return last_ret;
 }
 
-static esp_err_t fetch_and_show_random_image(void)
+static esp_err_t fetch_and_show_random_image(uint32_t generation)
 {
     esp_err_t ret = ESP_FAIL;
 
     for (int attempt = 1; attempt <= CONFIG_RANDOM_IMAGE_FETCH_RETRIES; attempt++) {
         http_buffer_t jpeg = { 0 };
-        ui_set_status_locked(attempt == 1 ? "Download image" : "Retry image", true);
+        if (!random_generation_active(generation)) {
+            return ESP_ERR_INVALID_STATE;
+        }
+        ui_set_status_locked_for_generation(generation, attempt == 1 ? "Download image" : "Retry image", true);
 
         ret = http_get_to_buffer(s_api_url, CONFIG_RANDOM_IMAGE_MAX_JPEG_KB * 1024, "Download",
-                                 CONFIG_RANDOM_IMAGE_IMAGE_TIMEOUT_MS, &jpeg);
+                                 CONFIG_RANDOM_IMAGE_IMAGE_TIMEOUT_MS, generation, &jpeg);
         if (ret == ESP_OK) {
+            if (!random_generation_active(generation)) {
+                heap_caps_free(jpeg.data);
+                return ESP_ERR_INVALID_STATE;
+            }
             esp_err_t cache_ret = write_file_bytes(SD_RANDOM_LATEST_PATH, jpeg.data, jpeg.len);
             if (cache_ret != ESP_OK) {
                 ESP_LOGW(TAG, "TF cache failed: %s", esp_err_to_name(cache_ret));
@@ -762,8 +825,8 @@ static esp_err_t fetch_and_show_random_image(void)
                 ESP_LOGW(TAG, "local cache failed: %s", esp_err_to_name(cache_ret));
             }
 
-            ui_set_status_locked("Decode image", true);
-            ret = decode_jpeg_to_lvgl(&jpeg);
+            ui_set_status_locked_for_generation(generation, "Decode image", true);
+            ret = decode_jpeg_to_lvgl(&jpeg, generation);
         }
 
         heap_caps_free(jpeg.data);
@@ -773,48 +836,79 @@ static esp_err_t fetch_and_show_random_image(void)
         ESP_LOGW(TAG, "attempt %d/%d failed: %s", attempt, CONFIG_RANDOM_IMAGE_FETCH_RETRIES, esp_err_to_name(ret));
     }
 
-    ui_set_status_locked("Try cache", true);
-    esp_err_t cached_ret = show_cached_image();
+    if (!random_generation_active(generation)) {
+        return ESP_ERR_INVALID_STATE;
+    }
+    ui_set_status_locked_for_generation(generation, "Try cache", true);
+    esp_err_t cached_ret = show_cached_image(generation);
     return cached_ret == ESP_OK ? ESP_OK : ret;
 }
 
 static void random_fetch_task(void *arg)
 {
+    random_fetch_req_t *req = (random_fetch_req_t *)arg;
+    uint32_t generation = req != NULL ? req->generation : s_page_generation;
+    free(req);
+
+    if (!random_generation_active(generation)) {
+        goto done;
+    }
+
     load_sd_config();
 
-    ui_set_status_locked("Connect WiFi", true);
+    ui_set_status_locked_for_generation(generation, "Connect WiFi", true);
     esp_err_t ret = wifi_connect_sta();
-    if (ret == ESP_OK) {
-        ret = fetch_and_show_random_image();
+    if (!random_generation_active(generation)) {
+        ret = ESP_ERR_INVALID_STATE;
+    } else if (ret == ESP_OK) {
+        ret = fetch_and_show_random_image(generation);
     } else {
         ESP_LOGW(TAG, "wifi connect failed: %s", esp_err_to_name(ret));
-        ui_set_status_locked("WiFi failed, try cache", true);
-        if (show_cached_image() == ESP_OK) {
+        ui_set_status_locked_for_generation(generation, "WiFi failed, try cache", true);
+        if (show_cached_image(generation) == ESP_OK) {
             ret = ESP_OK;
         }
     }
 
-    if (ret != ESP_OK) {
-        ui_set_status_locked("Refresh failed", false);
+    if (ret != ESP_OK && random_generation_active(generation)) {
+        ui_set_status_locked_for_generation(generation, "Refresh failed", false);
     }
 
+done:
     s_fetching = false;
+    if (s_refresh_pending && s_page != NULL) {
+        s_refresh_pending = false;
+        random_image_start_refresh();
+    }
     vTaskDelete(NULL);
 }
 
 static void random_image_start_refresh(void)
 {
-    if (s_fetching) {
+    if (s_page == NULL) {
         return;
     }
 
+    if (s_fetching) {
+        s_refresh_pending = true;
+        return;
+    }
+
+    random_fetch_req_t *req = calloc(1, sizeof(*req));
+    if (req == NULL) {
+        ESP_LOGE(TAG, "alloc random_image request failed");
+        return;
+    }
+
+    req->generation = s_page_generation;
     s_fetching = true;
-    BaseType_t ok = xTaskCreatePinnedToCoreWithCaps(random_fetch_task, "random_image", 12288, NULL, 4,
+    BaseType_t ok = xTaskCreatePinnedToCoreWithCaps(random_fetch_task, "random_image", 12288, req, 4,
                                                     NULL, 1, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
     if (ok != pdPASS) {
-        ok = xTaskCreatePinnedToCore(random_fetch_task, "random_image", 12288, NULL, 4, NULL, 1);
+        ok = xTaskCreatePinnedToCore(random_fetch_task, "random_image", 12288, req, 4, NULL, 1);
     }
     if (ok != pdPASS) {
+        free(req);
         s_fetching = false;
         ESP_LOGE(TAG, "create random_image task failed");
     }
@@ -869,6 +963,10 @@ static void ensure_button_task(void)
 
 static void random_back_cb(lv_event_t *e)
 {
+    (void)e;
+    s_page_generation++;
+    s_refresh_pending = false;
+    s_status_loading = false;
     if (s_page != NULL) {
         lv_obj_del(s_page);
         s_page = NULL;
@@ -919,11 +1017,18 @@ void random_image_app_event_handler(lv_event_t *e)
     }
 
     if (s_page != NULL) {
+        s_page_generation++;
         lv_obj_del(s_page);
+        s_page = NULL;
+        s_image = NULL;
+        s_title_bar = NULL;
+        s_status_label = NULL;
+        s_spinner = NULL;
     }
     icon_flag = 7;
     s_chrome_visible = true;
     s_status_loading = false;
+    s_page_generation++;
 
     s_page = lv_obj_create(lv_scr_act());
     lv_obj_set_size(s_page, LCD_W, LCD_H);
