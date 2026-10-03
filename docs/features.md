@@ -9,7 +9,10 @@ image when the random image app is active.
 ## Random Image
 
 The random image app downloads a JPEG body, decodes it with `esp_jpeg`, renders
-through a PSRAM canvas, and caches the last image under TF card storage.
+through a PSRAM canvas, and caches the last image under TF card storage. A small
+copy is also written to the on-board `/local` filesystem, so the app can fall
+back to the previous image when the TF card is absent or has just been
+formatted.
 HTTPS uses certificate validation with mbedTLS transient allocations moved to
 PSRAM. The refresh task and HTTP read buffer are also PSRAM-friendly so repeated
 refreshes do not exhaust internal DRAM after the first successful image.
@@ -23,8 +26,9 @@ Touch behavior:
 
 ## Media
 
-The file manager previews JPG, PNG, GIF, text, MP3, and WAV. Video files are
-currently detected as media but not played.
+The file manager previews JPG, PNG, GIF, text, MP3, and WAV from either the TF
+card or the on-board `/local` filesystem. Video files are currently detected as
+media but not played.
 
 Large previews are guarded before LVGL receives the file:
 
@@ -85,8 +89,8 @@ Music playback modes:
 - `单曲`: repeat the current track
 
 Opening music from the home launcher defaults to `顺序`. Opening an audio file
-from the TF card file manager defaults to `停止` and returns to the same folder
-when leaving the player.
+from a file manager defaults to `停止` and returns to the same TF or on-board
+folder when leaving the player.
 
 The recorder stores 16 kHz mono WAV files at:
 
@@ -112,17 +116,27 @@ The currently connected network is also synced to the random image app config.
 
 ## Device Storage
 
-The third launcher page includes `本机存储`. This read-only view works without
-a TF card and displays the detected Flash size, partition labels and offsets,
-NVS entry usage, and current internal-heap/PSRAM availability. The refresh icon
-updates these values. Configuration values and passwords are not displayed.
+The third launcher page includes `本机存储`. It works without a TF card and
+displays the detected Flash size, partition labels and offsets, NVS entry usage,
+on-board filesystem usage, and current internal-heap/PSRAM availability. The
+refresh icon updates these values. Configuration values and passwords are not
+displayed.
 
 With the current 16 MiB Flash layout, `factory` reserves 12 MiB for firmware and
-`storage` reserves 3 MiB for a future local filesystem. The latter is not yet
-mounted or usable as a file browser; it is explicitly shown as reserved. The
-space outside named partitions includes bootloader/partition-table space and
-must not be interpreted as available file storage. PSRAM is volatile memory.
-Formatting the TF card does not erase NVS WLAN history or Bluetooth bonds.
+`storage` reserves 3 MiB for a wear-level FAT filesystem mounted at `/local`.
+The touch UI can initialize product folders, open the local file browser, or
+format only this local filesystem with a two-tap confirmation. It is intended for
+small device files:
+
+- `/local/szpi/config`
+- `/local/szpi/cache/random/latest.jpg`
+- `/local/szpi/logs`
+
+Keep large media on the TF card. The space outside named partitions includes
+bootloader/partition-table space and must not be interpreted as available file
+storage. PSRAM is volatile memory. Formatting the TF card does not erase NVS
+WLAN history, Bluetooth bonds, or `/local`; formatting `/local` does not erase
+TF card data or NVS.
 
 ## Bluetooth
 

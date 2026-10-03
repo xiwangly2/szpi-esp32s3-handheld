@@ -20,6 +20,7 @@
 #include "esp_timer.h"
 #include "esp_wifi.h"
 #include "esp32_s3_szp.h"
+#include "device_storage.h"
 #include "freertos/event_groups.h"
 #include "freertos/idf_additions.h"
 #include "freertos/task.h"
@@ -40,6 +41,10 @@
 #define SD_RANDOM_CACHE_DIR SD_CACHE_DIR "/random"
 #define SD_WIFI_CONFIG_PATH SD_CONFIG_DIR "/wifi.ini"
 #define SD_RANDOM_LATEST_PATH SD_RANDOM_CACHE_DIR "/latest.jpg"
+#define LOCAL_APP_DIR DEVICE_STORAGE_MOUNT_POINT "/szpi"
+#define LOCAL_CACHE_DIR LOCAL_APP_DIR "/cache"
+#define LOCAL_RANDOM_CACHE_DIR LOCAL_CACHE_DIR "/random"
+#define LOCAL_RANDOM_LATEST_PATH LOCAL_RANDOM_CACHE_DIR "/latest.jpg"
 
 typedef struct {
     uint8_t *data;
@@ -133,6 +138,28 @@ static bool sdcard_prepare(void)
     return true;
 }
 
+static bool local_storage_prepare(void)
+{
+    esp_err_t ret = device_storage_prepare_product_dirs();
+    if (ret != ESP_OK) {
+        ESP_LOGW(TAG, "local storage unavailable: %s", esp_err_to_name(ret));
+        return false;
+    }
+
+    mkdir_if_missing(LOCAL_APP_DIR);
+    mkdir_if_missing(LOCAL_CACHE_DIR);
+    mkdir_if_missing(LOCAL_RANDOM_CACHE_DIR);
+    return true;
+}
+
+static bool prepare_for_path(const char *path)
+{
+    if (strncmp(path, DEVICE_STORAGE_MOUNT_POINT, strlen(DEVICE_STORAGE_MOUNT_POINT)) == 0) {
+        return local_storage_prepare();
+    }
+    return sdcard_prepare();
+}
+
 static void write_wifi_template(void)
 {
     FILE *existing = fopen(SD_WIFI_CONFIG_PATH, "r");
@@ -201,7 +228,7 @@ static void load_sd_config(void)
 
 static esp_err_t write_file_bytes(const char *path, const uint8_t *data, size_t len)
 {
-    if (!sdcard_prepare()) {
+    if (!prepare_for_path(path)) {
         return ESP_ERR_INVALID_STATE;
     }
 
@@ -681,18 +708,38 @@ static esp_err_t decode_jpeg_to_lvgl(const http_buffer_t *jpeg)
     return ret;
 }
 
-static esp_err_t show_cached_image(void)
+static esp_err_t show_cached_image_from_path(const char *path, const char *source_name)
 {
     http_buffer_t cached = { 0 };
-    esp_err_t ret = read_file_to_buffer(SD_RANDOM_LATEST_PATH, CONFIG_RANDOM_IMAGE_MAX_JPEG_KB * 1024, &cached);
+    esp_err_t ret = read_file_to_buffer(path, CONFIG_RANDOM_IMAGE_MAX_JPEG_KB * 1024, &cached);
     if (ret != ESP_OK) {
         return ret;
     }
 
-    ui_set_status_locked("Decode cache", true);
+    char status[40];
+    snprintf(status, sizeof(status), "Decode %s cache", source_name);
+    ui_set_status_locked(status, true);
     ret = decode_jpeg_to_lvgl(&cached);
     heap_caps_free(cached.data);
     return ret;
+}
+
+static esp_err_t show_cached_image(void)
+{
+    esp_err_t last_ret = ESP_ERR_NOT_FOUND;
+    if (sdcard_prepare()) {
+        last_ret = show_cached_image_from_path(SD_RANDOM_LATEST_PATH, "TF");
+        if (last_ret == ESP_OK) {
+            return ESP_OK;
+        }
+    }
+    if (local_storage_prepare()) {
+        last_ret = show_cached_image_from_path(LOCAL_RANDOM_LATEST_PATH, "local");
+        if (last_ret == ESP_OK) {
+            return ESP_OK;
+        }
+    }
+    return last_ret;
 }
 
 static esp_err_t fetch_and_show_random_image(void)
@@ -708,7 +755,11 @@ static esp_err_t fetch_and_show_random_image(void)
         if (ret == ESP_OK) {
             esp_err_t cache_ret = write_file_bytes(SD_RANDOM_LATEST_PATH, jpeg.data, jpeg.len);
             if (cache_ret != ESP_OK) {
-                ESP_LOGW(TAG, "cache failed: %s", esp_err_to_name(cache_ret));
+                ESP_LOGW(TAG, "TF cache failed: %s", esp_err_to_name(cache_ret));
+            }
+            cache_ret = write_file_bytes(LOCAL_RANDOM_LATEST_PATH, jpeg.data, jpeg.len);
+            if (cache_ret != ESP_OK) {
+                ESP_LOGW(TAG, "local cache failed: %s", esp_err_to_name(cache_ret));
             }
 
             ui_set_status_locked("Decode image", true);

@@ -7,6 +7,7 @@ firmware work; some need external hardware because of ESP32-S3 limits.
 
 - Media library scan and `/szpi/cache/media_index.tsv`.
 - TF card file browsing and safe previews for common media types.
+- On-board `/local` wear-level FAT for small config, logs, and cache fallback.
 - Camera photo capture, WAV recorder, MP3/WAV playback, WLAN history, BLE HID
   combo control, and random image caching.
 

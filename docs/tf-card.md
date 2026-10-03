@@ -95,9 +95,17 @@ formatter's `USB-FDD` preset is not itself a partition-table type: inspect
 card with one of these layouts does not turn the handheld into a USB disk.
 
 The separate `本机存储` launcher entry displays on-board Flash and NVS metadata
-without a TF card. The 3 MiB `storage` Flash partition is currently reserved,
-not an initialized user filesystem. WLAN history in NVS survives TF formatting;
-the TF copy and cached media on the formatted volume do not.
+without a TF card. The 3 MiB `storage` Flash partition is mounted as wear-level
+FAT at `/local` for small config, logs, and cache files. The random image app
+keeps a fallback copy at:
+
+```text
+/local/szpi/cache/random/latest.jpg
+```
+
+WLAN history in NVS and `/local` files survive TF formatting; the TF copy and
+cached media on the formatted volume do not. Formatting `/local` from the
+device UI does not erase the TF card or NVS.
 
 It can quick-format the currently mounted volume. Use `FS` to choose:
 

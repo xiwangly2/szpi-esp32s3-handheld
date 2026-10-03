@@ -42,7 +42,7 @@ lv_obj_t * icon_in_obj; // 应用界面
 int icon_flag; // 标记现在进入哪个应用 在主界面时为0
 
 static void sdcard_clear_music_return(void);
-static bool sdcard_restore_from_music(void);
+static bool file_browser_restore_from_music(void);
 static bool media_restore_from_music(void);
 
 /******************************** 第1个图标 姿态传感器 应用程序*************************************************************************************/
@@ -957,7 +957,7 @@ static void btn_music_back_cb(lv_event_t * e)
     }
     music_clear_ui_refs();
     music_player_release();
-    if (sdcard_restore_from_music()) {
+    if (file_browser_restore_from_music()) {
         return;
     }
     if (media_restore_from_music()) {
@@ -1112,7 +1112,15 @@ struct file_path_info
 };
 struct file_path_info file_path_info;
 static struct file_path_info s_music_return_path;
-static bool s_music_return_to_sdcard;
+
+typedef enum {
+    FILE_BROWSER_NONE = 0,
+    FILE_BROWSER_SDCARD,
+    FILE_BROWSER_LOCAL,
+} file_browser_source_t;
+
+static file_browser_source_t s_file_browser_source;
+static file_browser_source_t s_music_return_source;
 
 typedef enum {
     SD_FILE_OTHER = 0,
@@ -1154,14 +1162,14 @@ static void sd_preview_message(const char *title, const char *message);
 
 static void sdcard_clear_music_return(void)
 {
-    s_music_return_to_sdcard = false;
+    s_music_return_source = FILE_BROWSER_NONE;
     memset(&s_music_return_path, 0, sizeof(s_music_return_path));
 }
 
 static void sdcard_remember_music_return(void)
 {
     s_music_return_path = file_path_info;
-    s_music_return_to_sdcard = true;
+    s_music_return_source = s_file_browser_source;
 }
 
 static const char *sd_format_name(bsp_sdcard_format_t format)
@@ -2075,7 +2083,10 @@ static void btn_sdback_cb(lv_event_t * e)
 
     if (file_path_info.path_index == 0){ // 如果当前是根目录
         sd_preview_cleanup();
-        bsp_sdcard_unmount(); // 卸载SD卡
+        if (s_file_browser_source == FILE_BROWSER_SDCARD) {
+            bsp_sdcard_unmount(); // 卸载SD卡
+        }
+        s_file_browser_source = FILE_BROWSER_NONE;
         lv_obj_del(icon_in_obj); // 回到主界面
         icon_flag = 0;
     }else{
@@ -2178,25 +2189,41 @@ static void sdcard_create_nav_and_list(void)
     lv_obj_set_scrollbar_mode(sdcard_file_list, LV_SCROLLBAR_MODE_OFF);
 }
 
-static bool sdcard_restore_from_music(void)
+static const char *file_browser_title(file_browser_source_t source)
 {
-    if (!s_music_return_to_sdcard) {
+    return source == FILE_BROWSER_LOCAL ? "本机文件" : "TF卡";
+}
+
+static bool file_browser_restore_from_music(void)
+{
+    if (s_music_return_source == FILE_BROWSER_NONE) {
         return false;
     }
 
     struct file_path_info saved = s_music_return_path;
+    file_browser_source_t source = s_music_return_source;
     sdcard_clear_music_return();
 
-    if (bsp_sdcard_mount() != ESP_OK) {
-        icon_flag = 0;
-        return false;
+    if (source == FILE_BROWSER_SDCARD) {
+        if (bsp_sdcard_mount() != ESP_OK) {
+            icon_flag = 0;
+            return false;
+        }
+    } else if (source == FILE_BROWSER_LOCAL) {
+        if (device_storage_mount(true) != ESP_OK) {
+            icon_flag = 0;
+            return false;
+        }
     }
 
+    s_file_browser_source = source;
     file_path_info = saved;
-    sdcard_create_page_shell("TF卡");
-    if (sdmmc_card != NULL) {
+    sdcard_create_page_shell(file_browser_title(source));
+    if (source == FILE_BROWSER_SDCARD && sdmmc_card != NULL) {
         lv_label_set_text_fmt(sdcard_label, "SD: %lluGB",
             (((uint64_t)sdmmc_card->csd.capacity) * sdmmc_card->csd.sector_size) >> 30);
+    } else if (source == FILE_BROWSER_LOCAL) {
+        lv_label_set_text(sdcard_label, "本机文件");
     }
     sdcard_create_nav_and_list();
     if (list_sdcard_files(file_path_info.path_now) != ESP_OK) {
@@ -2236,8 +2263,24 @@ esp_err_t list_sdcard_files(char * path)
                 break;
             }
 
+            char child_path[512];
+            int path_len = snprintf(child_path, sizeof(child_path), "%s/%s", path, ent->d_name);
+            if (path_len <= 0 || path_len >= (int)sizeof(child_path)) {
+                continue;
+            }
+
+            bool entry_is_file = ent->d_type == DT_REG;
+            bool entry_is_dir = ent->d_type == DT_DIR;
+            if (!entry_is_file && !entry_is_dir) {
+                struct stat st;
+                if (stat(child_path, &st) == 0) {
+                    entry_is_file = S_ISREG(st.st_mode);
+                    entry_is_dir = S_ISDIR(st.st_mode);
+                }
+            }
+
             /* 常规文件处理 */
-            if (ent->d_type == DT_REG){ // 如果是常规文件
+            if (entry_is_file){ // 如果是常规文件
                 sd_file_type_t file_type = sd_classify_file(ent->d_name);
                 lvgl_port_lock(0);
                 switch (file_type)
@@ -2265,7 +2308,7 @@ esp_err_t list_sdcard_files(char * path)
                 lvgl_port_unlock();
             }
             /* 文件夹处理 */
-            else if (ent->d_type == DT_DIR) { // 如果是文件夹
+            else if (entry_is_dir) { // 如果是文件夹
                 lvgl_port_lock(0);
                 btn = lv_list_add_btn(sdcard_file_list, LV_SYMBOL_DIRECTORY, (const char *)ent->d_name); 
                 sdcard_style_file_button(btn);
@@ -2461,6 +2504,7 @@ static void sdcard_event_handler(lv_event_t * e)
     lv_obj_align(sdcard_label, LV_ALIGN_CENTER, 0, 0);
 
     icon_flag = 3; // 标记已经进入第三个应用
+    s_file_browser_source = FILE_BROWSER_SDCARD;
 
     xTaskCreatePinnedToCore(task_process_sdcard, "task_process_sdcard", 3 * 1024, NULL, 5, NULL, 1);
 }
@@ -2585,6 +2629,16 @@ static void sdmgr_event_handler(lv_event_t *e)
 
 
 static lv_obj_t *s_local_storage_label;
+static lv_obj_t *s_local_storage_status_label;
+static lv_obj_t *s_local_storage_fmt_label;
+static TaskHandle_t s_local_storage_task_handle;
+static bool s_local_format_confirm;
+
+typedef enum {
+    LOCAL_STORAGE_TASK_REFRESH = 0,
+    LOCAL_STORAGE_TASK_PREPARE,
+    LOCAL_STORAGE_TASK_FORMAT,
+} local_storage_task_t;
 
 static void storage_text_append(char *out, size_t capacity, const char *format, ...)
 {
@@ -2606,71 +2660,220 @@ static const char *storage_partition_usage(const device_storage_partition_t *par
     if (part->subtype == ESP_PARTITION_SUBTYPE_DATA_NVS) {
         return "配置";
     }
+    if (part->subtype == ESP_PARTITION_SUBTYPE_DATA_FAT) {
+        return "本机文件区";
+    }
     if (part->subtype == ESP_PARTITION_SUBTYPE_DATA_SPIFFS) {
-        return "预留文件区";
+        return "旧SPIFFS区";
     }
     return "系统";
+}
+
+static void local_storage_update_format_label(void)
+{
+    if (s_local_storage_fmt_label != NULL) {
+        lv_label_set_text(s_local_storage_fmt_label, s_local_format_confirm ? "OK?" : "FMT");
+    }
+}
+
+static void local_storage_build_text(char *text, size_t text_capacity,
+                                     const device_storage_info_t *info,
+                                     esp_err_t info_ret, esp_err_t op_ret)
+{
+    if (info_ret != ESP_OK) {
+        storage_text_append(text, text_capacity, "读取失败: %s\n", esp_err_to_name(info_ret));
+        return;
+    }
+
+    char total[24];
+    char free_size[24];
+    sd_format_bytes_u64(total, sizeof(total), info->flash_bytes);
+    storage_text_append(text, text_capacity, "板载 Flash: %s\n\n", total);
+    for (size_t i = 0; i < info->partition_count; i++) {
+        const device_storage_partition_t *part = &info->partitions[i];
+        sd_format_bytes_u64(total, sizeof(total), part->size);
+        storage_text_append(text, text_capacity, "%s (%s)\n%s  @0x%06lx\n",
+                            part->label, storage_partition_usage(part), total,
+                            (unsigned long)part->address);
+        if (part->type == ESP_PARTITION_TYPE_DATA && part->subtype == ESP_PARTITION_SUBTYPE_DATA_FAT &&
+            strcmp(part->label, DEVICE_STORAGE_PARTITION_LABEL) == 0) {
+            if (info->localfs_mounted && info->localfs_result == ESP_OK) {
+                char local_total[24];
+                char local_free[24];
+                uint64_t local_used = info->localfs_total_bytes > info->localfs_free_bytes ?
+                                      info->localfs_total_bytes - info->localfs_free_bytes : 0;
+                sd_format_bytes_u64(local_total, sizeof(local_total), info->localfs_total_bytes);
+                sd_format_bytes_u64(local_free, sizeof(local_free), info->localfs_free_bytes);
+                sd_format_bytes_u64(total, sizeof(total), local_used);
+                storage_text_append(text, text_capacity,
+                                    "挂载: %s\n总:%s 已用:%s 可用:%s\n",
+                                    DEVICE_STORAGE_MOUNT_POINT, local_total, total, local_free);
+            } else {
+                storage_text_append(text, text_capacity, "文件系统未挂载: %s\n",
+                                    esp_err_to_name(info->localfs_result));
+            }
+        }
+        storage_text_append(text, text_capacity, "\n");
+    }
+    if (info->flash_bytes >= info->partition_bytes) {
+        sd_format_bytes_u64(total, sizeof(total), info->flash_bytes - info->partition_bytes);
+        storage_text_append(text, text_capacity, "分区外: %s\n含引导区和保留空间\n\n", total);
+    }
+    if (info->nvs_result == ESP_OK) {
+        storage_text_append(text, text_capacity, "NVS 配置\n已用 %u / 共 %u 条目\n可用 %u 条目\nWLAN / 蓝牙绑定等\n\n",
+                            (unsigned)info->nvs.used_entries, (unsigned)info->nvs.total_entries,
+                            (unsigned)info->nvs.available_entries);
+    } else {
+        storage_text_append(text, text_capacity, "NVS: %s\n\n", esp_err_to_name(info->nvs_result));
+    }
+    if (op_ret != ESP_OK) {
+        storage_text_append(text, text_capacity, "最近操作: %s\n\n", esp_err_to_name(op_ret));
+    }
+    sd_format_bytes_u64(total, sizeof(total), info->psram_total);
+    sd_format_bytes_u64(free_size, sizeof(free_size), info->psram_free);
+    storage_text_append(text, text_capacity, "PSRAM: %s\n可用: %s\n", total, free_size);
+    sd_format_bytes_u64(total, sizeof(total), info->dram_total);
+    sd_format_bytes_u64(free_size, sizeof(free_size), info->dram_free);
+    storage_text_append(text, text_capacity, "内部堆: %s\n可用: %s\n运行内存，断电不保留", total, free_size);
+}
+
+static void local_storage_task(void *arg)
+{
+    local_storage_task_t action = (local_storage_task_t)(uintptr_t)arg;
+    const char *ok_status = "Ready";
+    esp_err_t op_ret = ESP_OK;
+
+    if (action == LOCAL_STORAGE_TASK_FORMAT) {
+        ok_status = "格式化完成";
+        op_ret = device_storage_format();
+    } else if (action == LOCAL_STORAGE_TASK_PREPARE) {
+        ok_status = "目录已初始化";
+        op_ret = device_storage_prepare_product_dirs();
+    } else {
+        op_ret = device_storage_prepare_product_dirs();
+    }
+
+    device_storage_info_t info;
+    esp_err_t info_ret = device_storage_get_info(&info);
+    const size_t text_capacity = 2048;
+    char *text = heap_caps_calloc(1, text_capacity, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (text != NULL) {
+        local_storage_build_text(text, text_capacity, &info, info_ret, op_ret);
+    }
+
+    lvgl_port_lock(0);
+    if (s_local_storage_status_label != NULL) {
+        lv_label_set_text(s_local_storage_status_label,
+                          op_ret == ESP_OK ? ok_status : "操作失败");
+    }
+    if (s_local_storage_label != NULL) {
+        lv_label_set_text(s_local_storage_label, text != NULL ? text : "内存不足，请稍后刷新");
+    }
+    s_local_format_confirm = false;
+    local_storage_update_format_label();
+    lvgl_port_unlock();
+
+    if (text != NULL) {
+        heap_caps_free(text);
+    }
+    s_local_storage_task_handle = NULL;
+    vTaskDelete(NULL);
+}
+
+static void local_storage_start_task(local_storage_task_t action, const char *busy_text)
+{
+    if (s_local_storage_task_handle != NULL) {
+        return;
+    }
+    if (s_local_storage_status_label != NULL) {
+        lv_label_set_text(s_local_storage_status_label, busy_text);
+    }
+    if (xTaskCreatePinnedToCore(local_storage_task, "local_storage", 5 * 1024,
+                                (void *)(uintptr_t)action, 4,
+                                &s_local_storage_task_handle, 1) != pdPASS) {
+        s_local_storage_task_handle = NULL;
+        if (s_local_storage_status_label != NULL) {
+            lv_label_set_text(s_local_storage_status_label, "任务创建失败");
+        }
+    }
 }
 
 static void local_storage_refresh_cb(lv_event_t *e)
 {
     (void)e;
-    if (s_local_storage_label == NULL) {
-        return;
+    local_storage_start_task(LOCAL_STORAGE_TASK_REFRESH, "刷新中...");
+}
+
+static void local_storage_prepare_cb(lv_event_t *e)
+{
+    if (lv_event_get_code(e) == LV_EVENT_CLICKED) {
+        local_storage_start_task(LOCAL_STORAGE_TASK_PREPARE, "初始化目录...");
     }
-    device_storage_info_t info;
-    esp_err_t ret = device_storage_get_info(&info);
-    if (ret != ESP_OK) {
-        lv_label_set_text_fmt(s_local_storage_label, "读取失败: %s", esp_err_to_name(ret));
+}
+
+static void local_storage_format_cb(lv_event_t *e)
+{
+    if (lv_event_get_code(e) != LV_EVENT_CLICKED || s_local_storage_task_handle != NULL) {
         return;
     }
 
-    const size_t text_capacity = 1536;
-    char *text = heap_caps_calloc(1, text_capacity, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
-    if (text == NULL) {
-        lv_label_set_text(s_local_storage_label, "内存不足，请稍后刷新");
+    if (!s_local_format_confirm) {
+        s_local_format_confirm = true;
+        local_storage_update_format_label();
+        if (s_local_storage_status_label != NULL) {
+            lv_label_set_text(s_local_storage_status_label, "再点OK?格式化本机");
+        }
         return;
     }
-    char total[24];
-    char free_size[24];
-    sd_format_bytes_u64(total, sizeof(total), info.flash_bytes);
-    storage_text_append(text, text_capacity, "板载 Flash: %s\n\n", total);
-    for (size_t i = 0; i < info.partition_count; i++) {
-        const device_storage_partition_t *part = &info.partitions[i];
-        sd_format_bytes_u64(total, sizeof(total), part->size);
-        storage_text_append(text, text_capacity, "%s (%s)\n%s  @0x%06lx\n",
-                            part->label, storage_partition_usage(part), total,
-                            (unsigned long)part->address);
-        if (part->type == ESP_PARTITION_TYPE_DATA && part->subtype == ESP_PARTITION_SUBTYPE_DATA_SPIFFS) {
-            storage_text_append(text, text_capacity, "文件系统尚未启用\n");
+
+    s_local_format_confirm = false;
+    local_storage_update_format_label();
+    local_storage_start_task(LOCAL_STORAGE_TASK_FORMAT, "格式化本机...");
+}
+
+static void local_storage_open_files_cb(lv_event_t *e)
+{
+    if (lv_event_get_code(e) != LV_EVENT_CLICKED || s_local_storage_task_handle != NULL) {
+        return;
+    }
+
+    esp_err_t ret = device_storage_prepare_product_dirs();
+    if (ret != ESP_OK) {
+        if (s_local_storage_status_label != NULL) {
+            lv_label_set_text_fmt(s_local_storage_status_label, "打开失败:%s", esp_err_to_name(ret));
         }
-        storage_text_append(text, text_capacity, "\n");
+        return;
     }
-    if (info.flash_bytes >= info.partition_bytes) {
-        sd_format_bytes_u64(total, sizeof(total), info.flash_bytes - info.partition_bytes);
-        storage_text_append(text, text_capacity, "分区外: %s\n含引导区和保留空间\n\n", total);
+
+    s_local_storage_label = NULL;
+    s_local_storage_status_label = NULL;
+    s_local_storage_fmt_label = NULL;
+    s_local_format_confirm = false;
+    lv_obj_del(icon_in_obj);
+    icon_in_obj = NULL;
+
+    s_file_browser_source = FILE_BROWSER_LOCAL;
+    sdcard_create_page_shell("本机文件");
+    sdcard_create_nav_and_list();
+    file_path_info.path_index = 0;
+    snprintf(file_path_info.path_now, sizeof(file_path_info.path_now), "%s", DEVICE_STORAGE_MOUNT_POINT);
+    file_path_info.path_back[0] = '\0';
+    s_sd_list_offset = 0;
+    if (list_sdcard_files(file_path_info.path_now) != ESP_OK) {
+        lv_label_set_text(sdcard_label, "目录读取失败");
     }
-    if (info.nvs_result == ESP_OK) {
-        storage_text_append(text, text_capacity, "NVS 配置\n已用 %u / 共 %u 条目\n可用 %u 条目\nWLAN / 蓝牙绑定等\n\n",
-                            (unsigned)info.nvs.used_entries, (unsigned)info.nvs.total_entries,
-                            (unsigned)info.nvs.available_entries);
-    } else {
-        storage_text_append(text, text_capacity, "NVS: %s\n\n", esp_err_to_name(info.nvs_result));
-    }
-    sd_format_bytes_u64(total, sizeof(total), info.psram_total);
-    sd_format_bytes_u64(free_size, sizeof(free_size), info.psram_free);
-    storage_text_append(text, text_capacity, "PSRAM: %s\n可用: %s\n", total, free_size);
-    sd_format_bytes_u64(total, sizeof(total), info.dram_total);
-    sd_format_bytes_u64(free_size, sizeof(free_size), info.dram_free);
-    storage_text_append(text, text_capacity, "内部堆: %s\n可用: %s\n运行内存，断电不保留", total, free_size);
-    lv_label_set_text(s_local_storage_label, text);
-    free(text);
 }
 
 static void local_storage_back_cb(lv_event_t *e)
 {
     (void)e;
+    if (s_local_storage_task_handle != NULL) {
+        return;
+    }
     s_local_storage_label = NULL;
+    s_local_storage_status_label = NULL;
+    s_local_storage_fmt_label = NULL;
+    s_local_format_confirm = false;
     lv_obj_del(icon_in_obj);
     icon_in_obj = NULL;
     icon_flag = 0;
@@ -2703,9 +2906,17 @@ static void local_storage_event_handler(lv_event_t *e)
     sdmgr_create_button(bar, LV_SYMBOL_LEFT, 4, 4, 44, lv_color_hex(0x176b78), local_storage_back_cb);
     sdmgr_create_button(bar, LV_SYMBOL_REFRESH, 272, 4, 44, lv_color_hex(0x176b78), local_storage_refresh_cb);
 
+    s_local_storage_status_label = lv_label_create(icon_in_obj);
+    lv_label_set_text(s_local_storage_status_label, "初始化中...");
+    lv_obj_set_style_text_font(s_local_storage_status_label, &font_alipuhui20, 0);
+    lv_obj_set_style_text_color(s_local_storage_status_label, lv_color_hex(0x176b78), 0);
+    lv_obj_set_width(s_local_storage_status_label, 300);
+    lv_label_set_long_mode(s_local_storage_status_label, LV_LABEL_LONG_DOT);
+    lv_obj_align(s_local_storage_status_label, LV_ALIGN_TOP_MID, 0, 42);
+
     lv_obj_t *body = lv_obj_create(icon_in_obj);
-    lv_obj_set_size(body, 320, 200);
-    lv_obj_set_pos(body, 0, 40);
+    lv_obj_set_size(body, 320, 132);
+    lv_obj_set_pos(body, 0, 64);
     lv_obj_set_style_border_width(body, 0, 0);
     lv_obj_set_style_radius(body, 0, 0);
     lv_obj_set_style_pad_all(body, 10, 0);
@@ -2716,8 +2927,14 @@ static void local_storage_event_handler(lv_event_t *e)
     lv_label_set_long_mode(s_local_storage_label, LV_LABEL_LONG_WRAP);
     lv_obj_set_style_text_font(s_local_storage_label, &font_alipuhui20, 0);
     lv_obj_set_style_text_color(s_local_storage_label, lv_color_hex(0x202a2c), 0);
+
+    sdmgr_create_button(icon_in_obj, "FILE", 8, 202, 62, lv_color_hex(0x397d61), local_storage_open_files_cb);
+    sdmgr_create_button(icon_in_obj, "DIR", 78, 202, 62, lv_color_hex(0x2f7a55), local_storage_prepare_cb);
+    s_local_storage_fmt_label = sdmgr_create_button(icon_in_obj, "FMT", 250, 202, 62,
+                                                    lv_color_hex(0x9b2c2c), local_storage_format_cb);
+    local_storage_update_format_label();
     icon_flag = 11;
-    local_storage_refresh_cb(NULL);
+    local_storage_start_task(LOCAL_STORAGE_TASK_REFRESH, "初始化中...");
 }
 
 /******************************** 第4个图标 摄像头 应用程序 *****************************************************************************/
