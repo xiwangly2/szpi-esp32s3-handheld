@@ -15,7 +15,6 @@ firmware work; some need external hardware because of ESP32-S3 limits.
 
 - On-demand JPEG thumbnails for the media library.
 - Incremental media index updates instead of full-card rescans.
-- Media-library favorites and recently opened items.
 - IP camera preview from a configurable JPEG or MJPEG URL over WLAN.
 - Better lifecycle guards when quickly switching camera, audio, WLAN, and BLE
   pages.

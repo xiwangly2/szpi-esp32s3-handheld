@@ -1159,6 +1159,7 @@ static void file_list_btn_cb(lv_event_t * e);
 static void sdcard_page_btn_cb(lv_event_t *e);
 static void btn_sdback_cb(lv_event_t * e);
 static void sd_preview_message(const char *title, const char *message);
+static void media_record_opened(const char *path, sd_file_type_t type, off_t file_size);
 
 static void sdcard_clear_music_return(void)
 {
@@ -1797,6 +1798,10 @@ static bool music_open_from_path(const char *path, bool return_to_sdcard)
 
 static void sd_preview_file(const char *path, sd_file_type_t type, off_t file_size)
 {
+    if (type != SD_FILE_OTHER) {
+        media_record_opened(path, type, file_size);
+    }
+
     switch (type) {
     case SD_FILE_AUDIO:
         if (file_size <= 0 || file_size > (off_t)SDCARD_AUDIO_PLAY_LIMIT) {
@@ -5366,9 +5371,13 @@ static void recorder_event_handler(lv_event_t *e)
 /******************************** 媒体库 应用程序 *****************************************************************************/
 #define MEDIA_LIBRARY_ICON_FLAG 10
 #define MEDIA_INDEX_PATH SD_MOUNT_POINT "/szpi/cache/media_index.tsv"
+#define MEDIA_RECENT_PATH SD_MOUNT_POINT "/szpi/cache/media_recent.tsv"
+#define MEDIA_FAVORITES_PATH SD_MOUNT_POINT "/szpi/cache/media_favorites.tsv"
 #define MEDIA_SCAN_MAX_FILES 1200
 #define MEDIA_SCAN_MAX_DEPTH 8
 #define MEDIA_LIST_MAX_ITEMS 80
+#define MEDIA_RECENT_MAX_ITEMS 48
+#define MEDIA_FAVORITES_MAX_ITEMS 96
 
 typedef enum {
     MEDIA_FILTER_ALL = 0,
@@ -5377,6 +5386,8 @@ typedef enum {
     MEDIA_FILTER_RECORDING,
     MEDIA_FILTER_VIDEO,
     MEDIA_FILTER_DOCUMENT,
+    MEDIA_FILTER_RECENT,
+    MEDIA_FILTER_FAVORITE,
     MEDIA_FILTER_COUNT,
 } media_filter_t;
 
@@ -5422,6 +5433,7 @@ static media_index_stats_t s_media_last_stats;
 static media_filter_t s_media_filter = MEDIA_FILTER_ALL;
 static size_t s_media_list_offset;
 static size_t s_media_total_matches;
+static int64_t s_media_suppress_click_until_us;
 static media_list_item_t *s_media_items[MEDIA_LIST_MAX_ITEMS];
 static size_t s_media_item_count;
 static bool s_music_return_to_media;
@@ -5460,6 +5472,10 @@ static const char *media_filter_name(media_filter_t filter)
         return "视频";
     case MEDIA_FILTER_DOCUMENT:
         return "文档";
+    case MEDIA_FILTER_RECENT:
+        return "最近";
+    case MEDIA_FILTER_FAVORITE:
+        return "收藏";
     case MEDIA_FILTER_ALL:
     default:
         return "全部";
@@ -5489,10 +5505,36 @@ static bool media_type_matches_filter(sd_file_type_t type, media_filter_t filter
         return type == SD_FILE_VIDEO;
     case MEDIA_FILTER_DOCUMENT:
         return type == SD_FILE_TEXT;
+    case MEDIA_FILTER_RECENT:
+    case MEDIA_FILTER_FAVORITE:
+        return type != SD_FILE_OTHER;
     case MEDIA_FILTER_ALL:
     default:
         return type != SD_FILE_OTHER;
     }
+}
+
+static const char *media_filter_source_path(media_filter_t filter)
+{
+    switch (filter) {
+    case MEDIA_FILTER_RECENT:
+        return MEDIA_RECENT_PATH;
+    case MEDIA_FILTER_FAVORITE:
+        return MEDIA_FAVORITES_PATH;
+    case MEDIA_FILTER_ALL:
+    case MEDIA_FILTER_IMAGE:
+    case MEDIA_FILTER_MUSIC:
+    case MEDIA_FILTER_RECORDING:
+    case MEDIA_FILTER_VIDEO:
+    case MEDIA_FILTER_DOCUMENT:
+    default:
+        return MEDIA_INDEX_PATH;
+    }
+}
+
+static bool media_filter_is_history(media_filter_t filter)
+{
+    return filter == MEDIA_FILTER_RECENT || filter == MEDIA_FILTER_FAVORITE;
 }
 
 static sd_file_type_t media_type_from_index_row(const char *type_text, const char *path)
@@ -5631,6 +5673,174 @@ static bool media_parse_index_row(char *line, sd_file_type_t *type, uint64_t *by
         *path = path_text;
     }
     return true;
+}
+
+static bool media_path_on_sdcard(const char *path)
+{
+    if (path == NULL) {
+        return false;
+    }
+    size_t mount_len = strlen(SD_MOUNT_POINT);
+    return strncmp(path, SD_MOUNT_POINT, mount_len) == 0 &&
+           (path[mount_len] == '\0' || path[mount_len] == '/');
+}
+
+static bool media_stat_saved_file(const char *path, sd_file_type_t *type, uint64_t *bytes)
+{
+    if (!media_path_on_sdcard(path)) {
+        return false;
+    }
+    struct stat st;
+    if (stat(path, &st) != 0 || !S_ISREG(st.st_mode)) {
+        return false;
+    }
+    if (type != NULL) {
+        *type = sd_classify_file(path);
+    }
+    if (bytes != NULL) {
+        *bytes = st.st_size > 0 ? (uint64_t)st.st_size : 0;
+    }
+    return true;
+}
+
+static void media_ensure_cache_dir(void)
+{
+    mkdir(SD_MOUNT_POINT "/szpi", 0775);
+    mkdir(SD_MOUNT_POINT "/szpi/cache", 0775);
+}
+
+static bool media_history_contains(const char *target, const char *want_path)
+{
+    if (target == NULL || want_path == NULL) {
+        return false;
+    }
+
+    FILE *f = fopen(target, "r");
+    if (f == NULL) {
+        return false;
+    }
+
+    bool found = false;
+    char line[768];
+    while (fgets(line, sizeof(line), f) != NULL) {
+        char *path = NULL;
+        if (!media_parse_index_row(line, NULL, NULL, &path)) {
+            continue;
+        }
+        if (strcmp(path, want_path) == 0) {
+            found = true;
+            break;
+        }
+    }
+    fclose(f);
+    return found;
+}
+
+static bool media_history_rewrite(const char *target, const char *header,
+                                  const char *primary_path, sd_file_type_t primary_type,
+                                  uint64_t primary_bytes, bool include_primary,
+                                  size_t max_items)
+{
+    if (target == NULL || header == NULL || primary_path == NULL || max_items == 0) {
+        return false;
+    }
+    if (!media_path_on_sdcard(primary_path)) {
+        return false;
+    }
+
+    media_ensure_cache_dir();
+
+    char tmp_path[560];
+    int written_len = snprintf(tmp_path, sizeof(tmp_path), "%s.tmp", target);
+    if (written_len <= 0 || written_len >= (int)sizeof(tmp_path)) {
+        return false;
+    }
+
+    FILE *out = fopen(tmp_path, "w");
+    if (out == NULL) {
+        return false;
+    }
+
+    fputs(header, out);
+    fputs("type\tsize\tpath\n", out);
+
+    size_t written = 0;
+    if (include_primary) {
+        media_index_write_row(out, primary_type, primary_bytes, primary_path);
+        written++;
+    }
+
+    FILE *in = fopen(target, "r");
+    if (in != NULL) {
+        char line[768];
+        while (written < max_items && fgets(line, sizeof(line), in) != NULL) {
+            sd_file_type_t type;
+            uint64_t bytes = 0;
+            char *path = NULL;
+            if (!media_parse_index_row(line, &type, &bytes, &path)) {
+                continue;
+            }
+            if (strcmp(path, primary_path) == 0) {
+                continue;
+            }
+            if (!media_stat_saved_file(path, &type, &bytes)) {
+                continue;
+            }
+            media_index_write_row(out, type, bytes, path);
+            written++;
+        }
+        fclose(in);
+    }
+
+    bool ok = fclose(out) == 0;
+    if (!ok) {
+        unlink(tmp_path);
+        return false;
+    }
+
+    unlink(target);
+    if (rename(tmp_path, target) != 0) {
+        unlink(tmp_path);
+        return false;
+    }
+    return true;
+}
+
+static void media_record_opened(const char *path, sd_file_type_t type, off_t file_size)
+{
+    if (type == SD_FILE_OTHER || !media_path_on_sdcard(path)) {
+        return;
+    }
+
+    uint64_t bytes = file_size > 0 ? (uint64_t)file_size : 0;
+    sd_file_type_t actual_type = type;
+    media_stat_saved_file(path, &actual_type, &bytes);
+    if (!media_history_rewrite(MEDIA_RECENT_PATH, "#SZPI_MEDIA_RECENT_V1\n",
+                               path, actual_type, bytes, true, MEDIA_RECENT_MAX_ITEMS)) {
+        ESP_LOGW(TAG, "failed to update media recent: %s", path);
+    }
+}
+
+static bool media_toggle_favorite(const char *path, sd_file_type_t type, off_t file_size, bool *added)
+{
+    if (added != NULL) {
+        *added = false;
+    }
+    if (type == SD_FILE_OTHER || !media_path_on_sdcard(path)) {
+        return false;
+    }
+
+    bool exists = media_history_contains(MEDIA_FAVORITES_PATH, path);
+    uint64_t bytes = file_size > 0 ? (uint64_t)file_size : 0;
+    sd_file_type_t actual_type = type;
+    media_stat_saved_file(path, &actual_type, &bytes);
+    bool ok = media_history_rewrite(MEDIA_FAVORITES_PATH, "#SZPI_MEDIA_FAVORITES_V1\n",
+                                    path, actual_type, bytes, !exists,
+                                    MEDIA_FAVORITES_MAX_ITEMS);
+    if (ok && added != NULL) {
+        *added = !exists;
+    }
+    return ok;
 }
 
 static bool media_load_index_stats(media_index_stats_t *stats)
@@ -5786,9 +5996,38 @@ static void media_detach_page_refs(void)
     s_media_next_button = NULL;
 }
 
+static void media_item_favorite_cb(lv_event_t *e)
+{
+    if (lv_event_get_code(e) != LV_EVENT_LONG_PRESSED) {
+        return;
+    }
+
+    media_list_item_t *item = (media_list_item_t *)lv_event_get_user_data(e);
+    if (item == NULL) {
+        return;
+    }
+
+    s_media_suppress_click_until_us = esp_timer_get_time() + 700000;
+
+    off_t bytes = (off_t)item->bytes;
+    struct stat st;
+    if (stat(item->path, &st) == 0 && S_ISREG(st.st_mode)) {
+        bytes = st.st_size;
+    }
+
+    bool added = false;
+    bool ok = media_toggle_favorite(item->path, item->type, bytes, &added);
+    if (s_media_status_label != NULL) {
+        lv_label_set_text(s_media_status_label, ok ? (added ? "已收藏" : "已取消收藏") : "收藏失败");
+    }
+}
+
 static void media_item_cb(lv_event_t *e)
 {
     if (lv_event_get_code(e) != LV_EVENT_CLICKED) {
+        return;
+    }
+    if (esp_timer_get_time() < s_media_suppress_click_until_us) {
         return;
     }
 
@@ -5808,6 +6047,7 @@ static void media_item_cb(lv_event_t *e)
     }
 
     if (type == SD_FILE_AUDIO) {
+        media_record_opened(path, type, bytes);
         if (bytes <= 0 || bytes > (off_t)SDCARD_AUDIO_PLAY_LIMIT) {
             sd_preview_large_file("音频播放", bytes, SDCARD_AUDIO_PLAY_LIMIT);
             return;
@@ -5829,19 +6069,24 @@ static void media_item_cb(lv_event_t *e)
 
 static void media_populate_list(media_filter_t filter)
 {
-    FILE *f = fopen(MEDIA_INDEX_PATH, "r");
-    bool have_index = f != NULL;
+    const char *source_path = media_filter_source_path(filter);
+    bool history_filter = media_filter_is_history(filter);
+    FILE *f = fopen(source_path, "r");
+    bool have_source = f != NULL;
     media_list_item_t *items[MEDIA_LIST_MAX_ITEMS] = {0};
     size_t count = 0;
     size_t total = 0;
 
-    if (have_index) {
+    if (have_source) {
         char line[768];
         while (fgets(line, sizeof(line), f) != NULL) {
             sd_file_type_t type;
             uint64_t bytes = 0;
             char *path = NULL;
             if (!media_parse_index_row(line, &type, &bytes, &path)) {
+                continue;
+            }
+            if (history_filter && !media_stat_saved_file(path, &type, &bytes)) {
                 continue;
             }
             if (!media_type_matches_filter(type, filter, path)) {
@@ -5865,7 +6110,7 @@ static void media_populate_list(media_filter_t filter)
         fclose(f);
     }
 
-    if (have_index && total > 0 && count == 0 && s_media_list_offset > 0) {
+    if (have_source && total > 0 && count == 0 && s_media_list_offset > 0) {
         s_media_list_offset = ((total - 1) / MEDIA_LIST_MAX_ITEMS) * MEDIA_LIST_MAX_ITEMS;
         media_populate_list(filter);
         return;
@@ -5899,7 +6144,7 @@ static void media_populate_list(media_filter_t filter)
             lv_obj_add_state(s_media_next_button, LV_STATE_DISABLED);
         }
     }
-    if (!have_index) {
+    if (!have_source && !history_filter) {
         lv_obj_t *btn = lv_list_add_btn(s_media_list, NULL, "先扫描索引");
         lv_list_btn_set_fonts(btn, false);
         if (s_media_status_label != NULL) {
@@ -5921,6 +6166,7 @@ static void media_populate_list(media_filter_t filter)
                                                sd_file_type_badge(item->type),
                                                sd_file_type_color(item->type),
                                                name);
+        lv_obj_add_event_cb(btn, media_item_favorite_cb, LV_EVENT_LONG_PRESSED, item);
         lv_obj_add_event_cb(btn, media_item_cb, LV_EVENT_CLICKED, item);
         s_media_items[s_media_item_count++] = item;
         items[i] = NULL;

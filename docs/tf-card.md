@@ -133,11 +133,23 @@ format without breaking old rows. It is meant as the base for richer media
 browsing, thumbnails, and incremental background updates.
 
 The media library can browse the index with `全部`, `图片`, `音乐`, `录音`,
-`视频`, and `文档` filters. The filter button cycles these modes. `上页` and
-`下页` page through the filtered results instead of creating every row at once.
-Selecting an indexed item reuses the normal file preview path: images, GIFs, and
-text open in the previewer, while audio opens the full music player and returns
-to the media library when leaving playback.
+`视频`, `文档`, `最近`, and `收藏` filters. The filter button cycles these
+modes. `上页` and `下页` page through the filtered results instead of creating
+every row at once. Selecting an indexed item reuses the normal file preview path:
+images, GIFs, and text open in the previewer, while audio opens the full music
+player and returns to the media library when leaving playback. Long-pressing a
+media-library row toggles that item in the favorites list.
+
+Recent and favorite entries are also TSV files under the same cache directory:
+
+```text
+/szpi/cache/media_recent.tsv
+/szpi/cache/media_favorites.tsv
+```
+
+Both files store file type, byte size, and absolute TF path. The firmware keeps
+the newest recent entries first, removes duplicates, and skips entries whose
+files no longer exist.
 
 The scanner deliberately avoids decoding thumbnails during the scan so it does
 not compete heavily with camera preview, random-image JPEG decode, or audio

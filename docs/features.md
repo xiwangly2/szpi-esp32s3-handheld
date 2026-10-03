@@ -52,12 +52,13 @@ operations live in the separate TF manager page.
 
 The media library builds `/szpi/cache/media_index.tsv` in the background and
 can browse that index by all media, images, music, recordings, videos, or
-documents. The category button cycles those filters, and the list is paged so a
-large card does not create an unbounded number of LVGL objects at once. Existing
-index files are read back on page open to show summary counts immediately.
-Leaving the media library cancels an in-flight scan and discards the partial
-index. Opening an indexed entry reuses the same preview and music-player paths
-as the TF card file manager.
+documents, plus recent and favorite entries stored on the card. The category
+button cycles those filters, and the list is paged so a large card does not
+create an unbounded number of LVGL objects at once. Existing index files are read
+back on page open to show summary counts immediately. Leaving the media library
+cancels an in-flight scan and discards the partial index. Opening an indexed
+entry reuses the same preview and music-player paths as the TF card file
+manager.
 
 The TF manager page shows capacity, mounted filesystem, partition table type
 (`GPT`, `MBR`, or raw FAT), and the first few partition entries. It also has a
