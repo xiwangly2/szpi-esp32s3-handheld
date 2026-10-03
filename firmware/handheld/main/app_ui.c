@@ -2115,6 +2115,108 @@ static void sdcard_add_list_message(const char *symbol, const char *message)
     lv_obj_set_style_text_font(btn, &font_alipuhui20, 0);
 }
 
+static void list_row_name_delete_cb(lv_event_t *e)
+{
+    lv_obj_t *obj = lv_event_get_target(e);
+    char *name = (char *)lv_obj_get_user_data(obj);
+    if (name != NULL) {
+        free(name);
+        lv_obj_set_user_data(obj, NULL);
+    }
+}
+
+static lv_color_t sd_file_type_color(sd_file_type_t type)
+{
+    switch (type) {
+    case SD_FILE_AUDIO:
+        return lv_color_hex(0x4c7bd9);
+    case SD_FILE_VIDEO:
+        return lv_color_hex(0xd96f3f);
+    case SD_FILE_IMAGE_JPEG:
+    case SD_FILE_IMAGE_PNG:
+    case SD_FILE_IMAGE_GIF:
+        return lv_color_hex(0x2fa66a);
+    case SD_FILE_TEXT:
+        return lv_color_hex(0xc08a34);
+    case SD_FILE_OTHER:
+    default:
+        return lv_color_hex(0x697386);
+    }
+}
+
+static const char *sd_file_type_badge(sd_file_type_t type)
+{
+    switch (type) {
+    case SD_FILE_AUDIO:
+        return "AUD";
+    case SD_FILE_VIDEO:
+        return "VID";
+    case SD_FILE_IMAGE_JPEG:
+    case SD_FILE_IMAGE_PNG:
+    case SD_FILE_IMAGE_GIF:
+        return "IMG";
+    case SD_FILE_TEXT:
+        return "TXT";
+    case SD_FILE_OTHER:
+    default:
+        return "FILE";
+    }
+}
+
+static lv_obj_t *list_add_badged_button(lv_obj_t *list, const char *badge, lv_color_t badge_color,
+                                        const char *text)
+{
+    lv_obj_t *btn = lv_btn_create(list);
+    lv_obj_set_size(btn, LV_PCT(100), LV_SIZE_CONTENT);
+    lv_obj_set_flex_flow(btn, LV_FLEX_FLOW_ROW);
+    lv_obj_set_style_pad_column(btn, 8, 0);
+
+    lv_obj_t *badge_label = lv_label_create(btn);
+    lv_label_set_text(badge_label, badge);
+    lv_obj_set_width(badge_label, 46);
+    lv_label_set_long_mode(badge_label, LV_LABEL_LONG_CLIP);
+    lv_obj_set_style_text_font(badge_label, &lv_font_montserrat_14, 0);
+    lv_obj_set_style_text_color(badge_label, lv_color_hex(0xffffff), 0);
+    lv_obj_set_style_text_align(badge_label, LV_TEXT_ALIGN_CENTER, 0);
+    lv_obj_set_style_bg_opa(badge_label, LV_OPA_COVER, 0);
+    lv_obj_set_style_bg_color(badge_label, badge_color, 0);
+    lv_obj_set_style_radius(badge_label, 4, 0);
+    lv_obj_set_style_pad_hor(badge_label, 4, 0);
+    lv_obj_set_style_pad_ver(badge_label, 2, 0);
+
+    lv_obj_t *label = lv_label_create(btn);
+    lv_label_set_text(label, text);
+    lv_label_set_long_mode(label, LV_LABEL_LONG_SCROLL_CIRCULAR);
+    lv_obj_set_flex_grow(label, 1);
+    lv_obj_set_style_text_font(label, &font_alipuhui20, 0);
+
+    return btn;
+}
+
+static lv_obj_t *sdcard_add_named_row(const char *badge, lv_color_t badge_color, const char *name)
+{
+    lv_obj_t *btn = list_add_badged_button(sdcard_file_list, badge, badge_color, name);
+    char *stored_name = strdup(name);
+    if (stored_name != NULL) {
+        lv_obj_set_user_data(btn, stored_name);
+        lv_obj_add_event_cb(btn, list_row_name_delete_cb, LV_EVENT_DELETE, NULL);
+    }
+    lv_obj_add_event_cb(btn, file_list_btn_cb, LV_EVENT_CLICKED, NULL);
+    return btn;
+}
+
+static const char *sdcard_get_row_name(lv_obj_t *btn)
+{
+    const char *name = (const char *)lv_obj_get_user_data(btn);
+    if (name != NULL && name[0] != '\0') {
+        return name;
+    }
+    if (lv_obj_get_child_cnt(btn) >= 2) {
+        return lv_label_get_text(lv_obj_get_child(btn, 1));
+    }
+    return lv_list_get_btn_text(lv_obj_get_parent(btn), btn);
+}
+
 static void lv_list_btn_set_fonts(lv_obj_t *btn, bool has_symbol)
 {
     lv_obj_set_style_text_font(btn, &font_alipuhui20, 0);
@@ -2131,37 +2233,12 @@ static void lv_list_btn_set_fonts(lv_obj_t *btn, bool has_symbol)
     }
 }
 
-static void sdcard_style_file_button(lv_obj_t *btn, bool has_symbol)
-{
-    lv_list_btn_set_fonts(btn, has_symbol);
-    lv_obj_add_event_cb(btn, file_list_btn_cb, LV_EVENT_CLICKED, NULL);
-}
-
-static const char *sd_file_type_symbol(sd_file_type_t type)
-{
-    switch (type) {
-    case SD_FILE_AUDIO:
-        return LV_SYMBOL_AUDIO;
-    case SD_FILE_VIDEO:
-        return LV_SYMBOL_VIDEO;
-    case SD_FILE_IMAGE_JPEG:
-    case SD_FILE_IMAGE_PNG:
-    case SD_FILE_IMAGE_GIF:
-        return LV_SYMBOL_IMAGE;
-    case SD_FILE_TEXT:
-        return LV_SYMBOL_FILE;
-    case SD_FILE_OTHER:
-    default:
-        return LV_SYMBOL_FILE;
-    }
-}
-
 static void sdcard_add_page_button(const char *text, intptr_t delta)
 {
-    lv_obj_t *btn = lv_list_add_btn(sdcard_file_list,
-                                    delta < 0 ? LV_SYMBOL_UP : LV_SYMBOL_DOWN,
-                                    text);
-    lv_list_btn_set_fonts(btn, true);
+    lv_obj_t *btn = list_add_badged_button(sdcard_file_list,
+                                           delta < 0 ? "UP" : "DN",
+                                           lv_color_hex(0x176b78),
+                                           text);
     lv_obj_add_event_cb(btn, sdcard_page_btn_cb, LV_EVENT_CLICKED, (void *)delta);
 }
 
@@ -2273,7 +2350,6 @@ esp_err_t list_sdcard_files(char * path)
     esp_err_t ret;
     DIR *dir;
     struct dirent *ent;
-    lv_obj_t * btn;
     size_t seen = 0;
     size_t shown = 0;
     bool has_next = false;
@@ -2318,16 +2394,16 @@ esp_err_t list_sdcard_files(char * path)
             if (entry_is_file){ // 如果是常规文件
                 sd_file_type_t file_type = sd_classify_file(ent->d_name);
                 lvgl_port_lock(0);
-                btn = lv_list_add_btn(sdcard_file_list, sd_file_type_symbol(file_type), ent->d_name);
-                sdcard_style_file_button(btn, true);
+                sdcard_add_named_row(sd_file_type_badge(file_type),
+                                     sd_file_type_color(file_type),
+                                     ent->d_name);
                 shown++;
                 lvgl_port_unlock();
             }
             /* 文件夹处理 */
             else if (entry_is_dir) { // 如果是文件夹
                 lvgl_port_lock(0);
-                btn = lv_list_add_btn(sdcard_file_list, LV_SYMBOL_DIRECTORY, ent->d_name);
-                sdcard_style_file_button(btn, true);
+                sdcard_add_named_row("DIR", lv_color_hex(0x2f7a55), ent->d_name);
                 shown++;
                 lvgl_port_unlock();
             }
@@ -2391,7 +2467,7 @@ static void file_list_btn_cb(lv_event_t * e)
 {
     const char *file_name = NULL; // 当前文件名称
     // 获取点击的按钮名称 即文件名称
-    file_name = lv_list_get_btn_text(lv_obj_get_parent(e->target), e->target);
+    file_name = sdcard_get_row_name(e->target);
     ESP_LOGI(TAG, "file name: %s", file_name);
 
     char selected_path[512];
@@ -5445,11 +5521,6 @@ static const char *media_basename(const char *path)
     return slash != NULL && slash[1] != '\0' ? slash + 1 : path;
 }
 
-static const char *media_item_symbol(sd_file_type_t type)
-{
-    return sd_file_type_symbol(type);
-}
-
 static void media_forget_list_items(void)
 {
     for (size_t i = 0; i < s_media_item_count; i++) {
@@ -5846,8 +5917,10 @@ static void media_populate_list(media_filter_t filter)
     for (size_t i = 0; i < count; i++) {
         media_list_item_t *item = items[i];
         const char *name = media_basename(item->path);
-        lv_obj_t *btn = lv_list_add_btn(s_media_list, media_item_symbol(item->type), name);
-        lv_list_btn_set_fonts(btn, true);
+        lv_obj_t *btn = list_add_badged_button(s_media_list,
+                                               sd_file_type_badge(item->type),
+                                               sd_file_type_color(item->type),
+                                               name);
         lv_obj_add_event_cb(btn, media_item_cb, LV_EVENT_CLICKED, item);
         s_media_items[s_media_item_count++] = item;
         items[i] = NULL;
