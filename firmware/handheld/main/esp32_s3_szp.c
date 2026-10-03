@@ -552,6 +552,7 @@ void bsp_lvgl_start(void)
 {
     /* 初始化LVGL */
     lvgl_port_cfg_t lvgl_cfg = ESP_LVGL_PORT_INIT_CONFIG();
+    lvgl_cfg.task_stack = 12 * 1024;
     lvgl_port_init(&lvgl_cfg);
 
     /* 初始化液晶屏 并添加LVGL接口 */
