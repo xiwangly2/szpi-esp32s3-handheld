@@ -41,6 +41,7 @@ void app_main(void)
     }
     ESP_ERROR_CHECK( ret );
     device_storage_log_info();
+    bsp_sdcard_lock_init();
 
     bsp_i2c_init();  // I2C初始化
     pca9557_init();  // IO扩展芯片初始化

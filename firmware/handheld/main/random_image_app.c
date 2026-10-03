@@ -902,11 +902,7 @@ static void random_image_start_refresh(void)
 
     req->generation = s_page_generation;
     s_fetching = true;
-    BaseType_t ok = xTaskCreatePinnedToCoreWithCaps(random_fetch_task, "random_image", 12288, req, 4,
-                                                    NULL, 1, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
-    if (ok != pdPASS) {
-        ok = xTaskCreatePinnedToCore(random_fetch_task, "random_image", 12288, req, 4, NULL, 1);
-    }
+    BaseType_t ok = xTaskCreatePinnedToCore(random_fetch_task, "random_image", 12288, req, 4, NULL, 1);
     if (ok != pdPASS) {
         free(req);
         s_fetching = false;

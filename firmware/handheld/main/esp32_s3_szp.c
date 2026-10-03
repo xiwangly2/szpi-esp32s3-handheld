@@ -8,6 +8,31 @@
 #include <sys/stat.h>
 
 static const char *TAG = "esp32_s3_szp";
+static StaticSemaphore_t s_sdcard_mutex_buffer;
+static SemaphoreHandle_t s_sdcard_mutex;
+
+void bsp_sdcard_lock_init(void)
+{
+    if (s_sdcard_mutex == NULL) {
+        s_sdcard_mutex = xSemaphoreCreateRecursiveMutexStatic(&s_sdcard_mutex_buffer);
+    }
+}
+
+static esp_err_t bsp_sdcard_lock(TickType_t ticks_to_wait)
+{
+    bsp_sdcard_lock_init();
+    if (s_sdcard_mutex == NULL) {
+        return ESP_ERR_NO_MEM;
+    }
+    return xSemaphoreTakeRecursive(s_sdcard_mutex, ticks_to_wait) == pdTRUE ? ESP_OK : ESP_ERR_TIMEOUT;
+}
+
+static void bsp_sdcard_unlock(void)
+{
+    if (s_sdcard_mutex != NULL) {
+        xSemaphoreGiveRecursive(s_sdcard_mutex);
+    }
+}
 
 /******************************************************************************/
 /***************************  I2C ↓ *******************************************/
@@ -1086,9 +1111,15 @@ cleanup:
 
 static esp_err_t bsp_sdcard_mount_internal(bool format_if_mount_failed)
 {
+    esp_err_t lock_ret = bsp_sdcard_lock(portMAX_DELAY);
+    if (lock_ret != ESP_OK) {
+        return lock_ret;
+    }
+
+    esp_err_t ret = ESP_OK;
     if (sdmmc_card != NULL) {
         ESP_LOGI(TAG, "SD card already mounted");
-        return ESP_OK;
+        goto done;
     }
 
     ESP_LOGI(TAG, "Mounting SD card");
@@ -1108,7 +1139,7 @@ static esp_err_t bsp_sdcard_mount_internal(bool format_if_mount_failed)
 
     ESP_LOGI(TAG, "Mounting filesystem Starting");
 
-    esp_err_t ret = esp_vfs_fat_sdmmc_mount(SD_MOUNT_POINT, &sdmmc_host, &slot_config, &mount_config, &sdmmc_card);
+    ret = esp_vfs_fat_sdmmc_mount(SD_MOUNT_POINT, &sdmmc_host, &slot_config, &mount_config, &sdmmc_card);
     if (ret == ESP_OK) {
         bsp_sdcard_info_t info;
         esp_err_t info_ret = bsp_sdcard_read_info(&info);
@@ -1124,6 +1155,8 @@ static esp_err_t bsp_sdcard_mount_internal(bool format_if_mount_failed)
             ESP_LOGW(TAG, "SD mounted; partition info unavailable: %s", esp_err_to_name(info_ret));
         }
     }
+done:
+    bsp_sdcard_unlock();
     return ret;
 }
 
