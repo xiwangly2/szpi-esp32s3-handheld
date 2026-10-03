@@ -55,10 +55,11 @@ can browse that index by all media, images, music, recordings, videos, or
 documents, plus recent and favorite entries stored on the card. The category
 button cycles those filters, and the list is paged so a large card does not
 create an unbounded number of LVGL objects at once. Existing index files are read
-back on page open to show summary counts immediately. Leaving the media library
-cancels an in-flight scan and discards the partial index. Opening an indexed
-entry reuses the same preview and music-player paths as the TF card file
-manager.
+back on page open to show summary counts immediately. The media page opens in a
+list-focused layout; the top-right info button expands the scan summary when
+needed. Leaving the media library cancels an in-flight scan and discards the
+partial index. Opening an indexed entry reuses the same preview and music-player
+paths as the TF card file manager.
 
 The TF manager page shows capacity, mounted filesystem, partition table type
 (`GPT`, `MBR`, or raw FAT), and the first few partition entries. It also has a

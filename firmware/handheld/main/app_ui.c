@@ -5378,6 +5378,10 @@ static void recorder_event_handler(lv_event_t *e)
 #define MEDIA_LIST_MAX_ITEMS 80
 #define MEDIA_RECENT_MAX_ITEMS 48
 #define MEDIA_FAVORITES_MAX_ITEMS 96
+#define MEDIA_LIST_FOCUSED_Y 68
+#define MEDIA_LIST_FOCUSED_H 126
+#define MEDIA_LIST_DETAIL_Y 126
+#define MEDIA_LIST_DETAIL_H 68
 
 typedef enum {
     MEDIA_FILTER_ALL = 0,
@@ -5421,8 +5425,10 @@ typedef struct {
 } media_list_item_t;
 
 static lv_obj_t *s_media_status_label;
+static lv_obj_t *s_media_info_panel;
 static lv_obj_t *s_media_info_label;
 static lv_obj_t *s_media_list;
+static lv_obj_t *s_media_info_button_label;
 static lv_obj_t *s_media_filter_button_label;
 static lv_obj_t *s_media_prev_button;
 static lv_obj_t *s_media_next_button;
@@ -5434,6 +5440,7 @@ static media_filter_t s_media_filter = MEDIA_FILTER_ALL;
 static size_t s_media_list_offset;
 static size_t s_media_total_matches;
 static int64_t s_media_suppress_click_until_us;
+static bool s_media_info_expanded;
 static media_list_item_t *s_media_items[MEDIA_LIST_MAX_ITEMS];
 static size_t s_media_item_count;
 static bool s_music_return_to_media;
@@ -5989,11 +5996,47 @@ static void media_update_ui(const char *status, const media_index_stats_t *stats
 static void media_detach_page_refs(void)
 {
     s_media_status_label = NULL;
+    s_media_info_panel = NULL;
     s_media_info_label = NULL;
     s_media_list = NULL;
+    s_media_info_button_label = NULL;
     s_media_filter_button_label = NULL;
     s_media_prev_button = NULL;
     s_media_next_button = NULL;
+}
+
+static void media_apply_layout(void)
+{
+    if (s_media_info_panel != NULL) {
+        if (s_media_info_expanded) {
+            lv_obj_clear_flag(s_media_info_panel, LV_OBJ_FLAG_HIDDEN);
+        } else {
+            lv_obj_add_flag(s_media_info_panel, LV_OBJ_FLAG_HIDDEN);
+        }
+    }
+
+    if (s_media_info_button_label != NULL) {
+        lv_label_set_text(s_media_info_button_label, s_media_info_expanded ? "列表" : "信息");
+    }
+
+    if (s_media_list != NULL) {
+        if (s_media_info_expanded) {
+            lv_obj_set_size(s_media_list, 296, MEDIA_LIST_DETAIL_H);
+            lv_obj_align(s_media_list, LV_ALIGN_TOP_LEFT, 12, MEDIA_LIST_DETAIL_Y);
+        } else {
+            lv_obj_set_size(s_media_list, 296, MEDIA_LIST_FOCUSED_H);
+            lv_obj_align(s_media_list, LV_ALIGN_TOP_LEFT, 12, MEDIA_LIST_FOCUSED_Y);
+        }
+    }
+}
+
+static void media_info_toggle_cb(lv_event_t *e)
+{
+    if (lv_event_get_code(e) != LV_EVENT_CLICKED) {
+        return;
+    }
+    s_media_info_expanded = !s_media_info_expanded;
+    media_apply_layout();
 }
 
 static void media_item_favorite_cb(lv_event_t *e)
@@ -6383,11 +6426,28 @@ static void media_create_page(bool auto_scan)
     lv_obj_set_style_text_color(title_label, lv_color_hex(0xffffff), 0);
     lv_obj_center(title_label);
 
+    lv_obj_t *btn_info = lv_btn_create(title);
+    lv_obj_align(btn_info, LV_ALIGN_RIGHT_MID, -2, 0);
+    lv_obj_set_size(btn_info, 58, 34);
+    lv_obj_set_style_border_width(btn_info, 0, 0);
+    lv_obj_set_style_pad_all(btn_info, 0, 0);
+    lv_obj_set_style_bg_opa(btn_info, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_shadow_opa(btn_info, LV_OPA_TRANSP, 0);
+    lv_obj_add_event_cb(btn_info, media_info_toggle_cb, LV_EVENT_CLICKED, NULL);
+
+    s_media_info_button_label = lv_label_create(btn_info);
+    lv_label_set_text(s_media_info_button_label, "信息");
+    lv_obj_set_style_text_font(s_media_info_button_label, &font_alipuhui20, 0);
+    lv_obj_set_style_text_color(s_media_info_button_label, lv_color_hex(0xffffff), 0);
+    lv_obj_center(s_media_info_button_label);
+
     s_media_status_label = lv_label_create(icon_in_obj);
     lv_label_set_text(s_media_status_label, "Ready");
     lv_obj_set_style_text_font(s_media_status_label, &font_alipuhui20, 0);
     lv_obj_set_style_text_color(s_media_status_label, lv_color_hex(0xe8eef9), 0);
-    lv_obj_align(s_media_status_label, LV_ALIGN_TOP_LEFT, 12, 44);
+    lv_obj_set_width(s_media_status_label, 296);
+    lv_label_set_long_mode(s_media_status_label, LV_LABEL_LONG_SCROLL_CIRCULAR);
+    lv_obj_align(s_media_status_label, LV_ALIGN_TOP_LEFT, 12, 42);
 
     lv_obj_t *panel = lv_obj_create(icon_in_obj);
     lv_obj_set_size(panel, 296, 56);
@@ -6397,6 +6457,7 @@ static void media_create_page(bool auto_scan)
     lv_obj_set_style_bg_color(panel, lv_color_hex(0x1f2937), 0);
     lv_obj_set_style_pad_all(panel, 8, 0);
     lv_obj_set_scrollbar_mode(panel, LV_SCROLLBAR_MODE_AUTO);
+    s_media_info_panel = panel;
 
     s_media_info_label = lv_label_create(panel);
     lv_obj_set_width(s_media_info_label, 276);
@@ -6406,12 +6467,13 @@ static void media_create_page(bool auto_scan)
     lv_label_set_text(s_media_info_label, "等待扫描...");
 
     s_media_list = lv_list_create(icon_in_obj);
-    lv_obj_set_size(s_media_list, 296, 68);
-    lv_obj_align(s_media_list, LV_ALIGN_TOP_LEFT, 12, 126);
+    lv_obj_set_size(s_media_list, 296, MEDIA_LIST_FOCUSED_H);
+    lv_obj_align(s_media_list, LV_ALIGN_TOP_LEFT, 12, MEDIA_LIST_FOCUSED_Y);
     lv_obj_set_style_border_width(s_media_list, 0, 0);
     lv_obj_set_style_radius(s_media_list, 6, 0);
     lv_obj_set_style_text_font(s_media_list, &font_alipuhui20, 0);
     lv_obj_set_scrollbar_mode(s_media_list, LV_SCROLLBAR_MODE_AUTO);
+    media_apply_layout();
 
     lv_obj_t *filter_btn = media_create_button(icon_in_obj, media_filter_name(s_media_filter),
                                                8, 72, lv_color_hex(0x3662a3),
@@ -6442,6 +6504,7 @@ static void media_event_handler(lv_event_t *e)
 {
     (void)e;
     s_media_list_offset = 0;
+    s_media_info_expanded = false;
     media_create_page(true);
 }
 
