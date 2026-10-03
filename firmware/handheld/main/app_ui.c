@@ -2110,22 +2110,43 @@ static void btn_sdback_cb(lv_event_t * e)
 
 static void sdcard_add_list_message(const char *symbol, const char *message)
 {
-    lv_obj_t *btn = lv_list_add_btn(sdcard_file_list, symbol, message);
+    (void)symbol;
+    lv_obj_t *btn = lv_list_add_btn(sdcard_file_list, NULL, message);
     lv_obj_set_style_text_font(btn, &font_alipuhui20, 0);
 }
 
 static void sdcard_style_file_button(lv_obj_t *btn)
 {
-    lv_obj_t *icon = lv_obj_get_child(btn, 0);
-    if (icon != NULL) {
-        lv_obj_set_style_text_font(icon, &lv_font_montserrat_24, 0);
-    }
     lv_obj_add_event_cb(btn, file_list_btn_cb, LV_EVENT_CLICKED, NULL);
+}
+
+static const char *sd_file_type_prefix(sd_file_type_t type)
+{
+    switch (type) {
+    case SD_FILE_AUDIO:
+        return "[AUD]";
+    case SD_FILE_VIDEO:
+        return "[VID]";
+    case SD_FILE_IMAGE_JPEG:
+    case SD_FILE_IMAGE_PNG:
+    case SD_FILE_IMAGE_GIF:
+        return "[IMG]";
+    case SD_FILE_TEXT:
+        return "[TXT]";
+    case SD_FILE_OTHER:
+    default:
+        return "[FILE]";
+    }
+}
+
+static void sdcard_make_list_label(char *out, size_t out_len, const char *prefix, const char *name)
+{
+    snprintf(out, out_len, "%s %s", prefix, name != NULL ? name : "");
 }
 
 static void sdcard_add_page_button(const char *text, intptr_t delta)
 {
-    lv_obj_t *btn = lv_list_add_btn(sdcard_file_list, delta < 0 ? LV_SYMBOL_UP : LV_SYMBOL_DOWN, text);
+    lv_obj_t *btn = lv_list_add_btn(sdcard_file_list, NULL, text);
     lv_obj_set_style_text_font(btn, &font_alipuhui20, 0);
     lv_obj_add_event_cb(btn, sdcard_page_btn_cb, LV_EVENT_CLICKED, (void *)delta);
 }
@@ -2282,35 +2303,21 @@ esp_err_t list_sdcard_files(char * path)
             /* 常规文件处理 */
             if (entry_is_file){ // 如果是常规文件
                 sd_file_type_t file_type = sd_classify_file(ent->d_name);
+                char display_name[320];
+                sdcard_make_list_label(display_name, sizeof(display_name),
+                                       sd_file_type_prefix(file_type), ent->d_name);
                 lvgl_port_lock(0);
-                switch (file_type)
-                {
-                case SD_FILE_AUDIO:
-                    btn = lv_list_add_btn(sdcard_file_list, LV_SYMBOL_AUDIO, (const char *)ent->d_name);  // 显示音乐文件图标
-                    break;
-                case SD_FILE_VIDEO:
-                    btn = lv_list_add_btn(sdcard_file_list, LV_SYMBOL_VIDEO, (const char *)ent->d_name);  // 显示视频文件图标
-                    break;
-                case SD_FILE_IMAGE_JPEG:
-                case SD_FILE_IMAGE_PNG:
-                case SD_FILE_IMAGE_GIF:
-                    btn = lv_list_add_btn(sdcard_file_list, LV_SYMBOL_IMAGE, (const char *)ent->d_name);  // 显示图片文件图标
-                    break;
-                case SD_FILE_TEXT:
-                    btn = lv_list_add_btn(sdcard_file_list, LV_SYMBOL_FILE, (const char *)ent->d_name);  // 显示文本文件图标
-                    break;
-                default:
-                    btn = lv_list_add_btn(sdcard_file_list, LV_SYMBOL_FILE, (const char *)ent->d_name);  // 显示普通文件图标
-                    break;
-                }
+                btn = lv_list_add_btn(sdcard_file_list, NULL, display_name);
                 sdcard_style_file_button(btn);
                 shown++;
                 lvgl_port_unlock();
             }
             /* 文件夹处理 */
             else if (entry_is_dir) { // 如果是文件夹
+                char display_name[320];
+                sdcard_make_list_label(display_name, sizeof(display_name), "[DIR]", ent->d_name);
                 lvgl_port_lock(0);
-                btn = lv_list_add_btn(sdcard_file_list, LV_SYMBOL_DIRECTORY, (const char *)ent->d_name); 
+                btn = lv_list_add_btn(sdcard_file_list, NULL, display_name);
                 sdcard_style_file_button(btn);
                 shown++;
                 lvgl_port_unlock();
@@ -5249,27 +5256,15 @@ static sd_file_type_t media_type_from_index_row(const char *type_text, const cha
     return SD_FILE_OTHER;
 }
 
-static const char *media_item_symbol(sd_file_type_t type)
-{
-    switch (type) {
-    case SD_FILE_AUDIO:
-        return LV_SYMBOL_AUDIO;
-    case SD_FILE_VIDEO:
-        return LV_SYMBOL_PLAY;
-    case SD_FILE_IMAGE_JPEG:
-    case SD_FILE_IMAGE_PNG:
-    case SD_FILE_IMAGE_GIF:
-        return LV_SYMBOL_IMAGE;
-    case SD_FILE_TEXT:
-    default:
-        return LV_SYMBOL_FILE;
-    }
-}
-
 static const char *media_basename(const char *path)
 {
     const char *slash = path != NULL ? strrchr(path, '/') : NULL;
     return slash != NULL && slash[1] != '\0' ? slash + 1 : path;
+}
+
+static void media_make_item_label(char *out, size_t out_len, sd_file_type_t type, const char *name)
+{
+    snprintf(out, out_len, "%s %s", sd_file_type_prefix(type), name != NULL ? name : "");
 }
 
 static void media_forget_list_items(void)
@@ -5567,7 +5562,7 @@ static void media_populate_list(media_filter_t filter)
 
     media_clear_list_locked();
     if (!have_index) {
-        lv_obj_t *btn = lv_list_add_btn(s_media_list, LV_SYMBOL_FILE, "先扫描索引");
+        lv_obj_t *btn = lv_list_add_btn(s_media_list, NULL, "先扫描索引");
         lv_obj_set_style_text_font(btn, &font_alipuhui20, 0);
         if (s_media_status_label != NULL) {
             lv_label_set_text(s_media_status_label, "没有索引文件");
@@ -5577,14 +5572,16 @@ static void media_populate_list(media_filter_t filter)
     }
 
     if (count == 0) {
-        lv_obj_t *btn = lv_list_add_btn(s_media_list, LV_SYMBOL_FILE, "暂无项目");
+        lv_obj_t *btn = lv_list_add_btn(s_media_list, NULL, "暂无项目");
         lv_obj_set_style_text_font(btn, &font_alipuhui20, 0);
     }
 
     for (size_t i = 0; i < count; i++) {
         media_list_item_t *item = items[i];
         const char *name = media_basename(item->path);
-        lv_obj_t *btn = lv_list_add_btn(s_media_list, media_item_symbol(item->type), name);
+        char display_name[320];
+        media_make_item_label(display_name, sizeof(display_name), item->type, name);
+        lv_obj_t *btn = lv_list_add_btn(s_media_list, NULL, display_name);
         lv_obj_set_style_text_font(btn, &font_alipuhui20, 0);
         lv_obj_add_event_cb(btn, media_item_cb, LV_EVENT_CLICKED, item);
         s_media_items[s_media_item_count++] = item;
