@@ -51,10 +51,13 @@ The TF card file manager is kept focused on browsing and media previews. Disk
 operations live in the separate TF manager page.
 
 The media library builds `/szpi/cache/media_index.tsv` in the background and
-can browse that index by all media, images, audio, or text. Leaving the media
-library cancels an in-flight scan and discards the partial index. Opening an
-indexed entry reuses the same preview and music-player paths as the TF card file
-manager.
+can browse that index by all media, images, music, recordings, videos, or
+documents. The category button cycles those filters, and the list is paged so a
+large card does not create an unbounded number of LVGL objects at once. Existing
+index files are read back on page open to show summary counts immediately.
+Leaving the media library cancels an in-flight scan and discards the partial
+index. Opening an indexed entry reuses the same preview and music-player paths
+as the TF card file manager.
 
 The TF manager page shows capacity, mounted filesystem, partition table type
 (`GPT`, `MBR`, or raw FAT), and the first few partition entries. It also has a
@@ -159,5 +162,5 @@ Bluetooth audio module connected by I2S or UART.
 
 Exploratory directions are intentionally tracked as future work until they are
 stable on real hardware: BLE Audio or external A2DP/HFP audio module support,
-USB plug-and-play camera, short video playback, camera recording, a fuller media
-library, thumbnail generation, and background indexing.
+USB plug-and-play camera, short video playback, camera recording, thumbnail
+generation, and incremental background indexing.

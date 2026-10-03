@@ -5297,8 +5297,11 @@ static void recorder_event_handler(lv_event_t *e)
 typedef enum {
     MEDIA_FILTER_ALL = 0,
     MEDIA_FILTER_IMAGE,
-    MEDIA_FILTER_AUDIO,
-    MEDIA_FILTER_TEXT,
+    MEDIA_FILTER_MUSIC,
+    MEDIA_FILTER_RECORDING,
+    MEDIA_FILTER_VIDEO,
+    MEDIA_FILTER_DOCUMENT,
+    MEDIA_FILTER_COUNT,
 } media_filter_t;
 
 typedef struct {
@@ -5306,6 +5309,8 @@ typedef struct {
     uint32_t dirs;
     uint32_t images;
     uint32_t audio;
+    uint32_t music;
+    uint32_t recordings;
     uint32_t videos;
     uint32_t text;
     uint32_t other;
@@ -5331,14 +5336,21 @@ typedef struct {
 static lv_obj_t *s_media_status_label;
 static lv_obj_t *s_media_info_label;
 static lv_obj_t *s_media_list;
+static lv_obj_t *s_media_filter_button_label;
+static lv_obj_t *s_media_prev_button;
+static lv_obj_t *s_media_next_button;
 static TaskHandle_t s_media_scan_task_handle;
 static volatile bool s_media_page_active;
 static volatile bool s_media_scan_cancel;
 static media_index_stats_t s_media_last_stats;
 static media_filter_t s_media_filter = MEDIA_FILTER_ALL;
+static size_t s_media_list_offset;
+static size_t s_media_total_matches;
 static media_list_item_t *s_media_items[MEDIA_LIST_MAX_ITEMS];
 static size_t s_media_item_count;
 static bool s_music_return_to_media;
+
+static void media_update_ui(const char *status, const media_index_stats_t *stats);
 
 static const char *media_type_name(sd_file_type_t type)
 {
@@ -5364,24 +5376,42 @@ static const char *media_filter_name(media_filter_t filter)
     switch (filter) {
     case MEDIA_FILTER_IMAGE:
         return "图片";
-    case MEDIA_FILTER_AUDIO:
-        return "音频";
-    case MEDIA_FILTER_TEXT:
-        return "文本";
+    case MEDIA_FILTER_MUSIC:
+        return "音乐";
+    case MEDIA_FILTER_RECORDING:
+        return "录音";
+    case MEDIA_FILTER_VIDEO:
+        return "视频";
+    case MEDIA_FILTER_DOCUMENT:
+        return "文档";
     case MEDIA_FILTER_ALL:
     default:
         return "全部";
     }
 }
 
-static bool media_type_matches_filter(sd_file_type_t type, media_filter_t filter)
+static bool media_path_contains(const char *path, const char *needle)
+{
+    return path != NULL && needle != NULL && strstr(path, needle) != NULL;
+}
+
+static bool media_is_recording_path(const char *path)
+{
+    return media_path_contains(path, "/szpi/recordings/");
+}
+
+static bool media_type_matches_filter(sd_file_type_t type, media_filter_t filter, const char *path)
 {
     switch (filter) {
     case MEDIA_FILTER_IMAGE:
         return type == SD_FILE_IMAGE_JPEG || type == SD_FILE_IMAGE_PNG || type == SD_FILE_IMAGE_GIF;
-    case MEDIA_FILTER_AUDIO:
-        return type == SD_FILE_AUDIO;
-    case MEDIA_FILTER_TEXT:
+    case MEDIA_FILTER_MUSIC:
+        return type == SD_FILE_AUDIO && !media_is_recording_path(path);
+    case MEDIA_FILTER_RECORDING:
+        return type == SD_FILE_AUDIO && media_is_recording_path(path);
+    case MEDIA_FILTER_VIDEO:
+        return type == SD_FILE_VIDEO;
+    case MEDIA_FILTER_DOCUMENT:
         return type == SD_FILE_TEXT;
     case MEDIA_FILTER_ALL:
     default:
@@ -5437,13 +5467,18 @@ static void media_clear_list_locked(void)
     media_forget_list_items();
 }
 
-static void media_stats_add_file(media_index_stats_t *stats, sd_file_type_t type, uint64_t bytes)
+static void media_stats_add_file(media_index_stats_t *stats, sd_file_type_t type, uint64_t bytes, const char *path)
 {
     stats->files++;
     switch (type) {
     case SD_FILE_AUDIO:
         stats->audio++;
         stats->audio_bytes += bytes;
+        if (media_is_recording_path(path)) {
+            stats->recordings++;
+        } else {
+            stats->music++;
+        }
         break;
     case SD_FILE_VIDEO:
         stats->videos++;
@@ -5487,6 +5522,70 @@ static void media_index_write_row(FILE *f, sd_file_type_t type, uint64_t bytes, 
     fprintf(f, "\t%llu\t", (unsigned long long)bytes);
     media_write_escaped(f, path);
     fputc('\n', f);
+}
+
+static bool media_parse_index_row(char *line, sd_file_type_t *type, uint64_t *bytes, char **path)
+{
+    if (line == NULL || line[0] == '\0' || line[0] == '#') {
+        return false;
+    }
+    if (strncmp(line, "type\t", 5) == 0) {
+        return false;
+    }
+
+    char *type_text = line;
+    char *size_text = strchr(type_text, '\t');
+    if (size_text == NULL) {
+        return false;
+    }
+    *size_text++ = '\0';
+
+    char *path_text = strchr(size_text, '\t');
+    if (path_text == NULL) {
+        return false;
+    }
+    *path_text++ = '\0';
+    path_text[strcspn(path_text, "\r\n")] = '\0';
+    if (path_text[0] == '\0') {
+        return false;
+    }
+
+    if (type != NULL) {
+        *type = media_type_from_index_row(type_text, path_text);
+    }
+    if (bytes != NULL) {
+        *bytes = strtoull(size_text, NULL, 10);
+    }
+    if (path != NULL) {
+        *path = path_text;
+    }
+    return true;
+}
+
+static bool media_load_index_stats(media_index_stats_t *stats)
+{
+    if (stats == NULL) {
+        return false;
+    }
+
+    FILE *f = fopen(MEDIA_INDEX_PATH, "r");
+    if (f == NULL) {
+        return false;
+    }
+
+    memset(stats, 0, sizeof(*stats));
+    char line[768];
+    while (fgets(line, sizeof(line), f) != NULL) {
+        sd_file_type_t type;
+        uint64_t bytes = 0;
+        char *path = NULL;
+        if (!media_parse_index_row(line, &type, &bytes, &path)) {
+            continue;
+        }
+        media_stats_add_file(stats, type, bytes, path);
+    }
+    fclose(f);
+    return stats->files > 0;
 }
 
 static void media_scan_dir(media_scan_ctx_t *ctx, const char *path, int depth)
@@ -5538,10 +5637,13 @@ static void media_scan_dir(media_scan_ctx_t *ctx, const char *path, int depth)
             }
             sd_file_type_t type = sd_classify_file(child);
             uint64_t bytes = st.st_size > 0 ? (uint64_t)st.st_size : 0;
-            media_stats_add_file(&ctx->stats, type, bytes);
+            media_stats_add_file(&ctx->stats, type, bytes, child);
             media_index_write_row(ctx->index, type, bytes, child);
             if ((ctx->stats.files & 0x1f) == 0) {
                 vTaskDelay(1);
+            }
+            if ((ctx->stats.files & 0x3f) == 0) {
+                media_update_ui("索引中...", &ctx->stats);
             }
         }
 
@@ -5567,16 +5669,17 @@ static void media_build_summary(const media_index_stats_t *stats, char *out, siz
 
     snprintf(out, out_len,
              "文件:%lu 目录:%lu\n"
-             "图片:%lu  %s\n"
-             "音频:%lu  %s\n"
-             "视频:%lu  %s\n"
-             "文本:%lu  %s\n"
-             "其他:%lu  %s\n"
+             "图片:%lu %s  音频:%lu %s\n"
+             "音乐:%lu  录音:%lu\n"
+             "视频:%lu %s  文档:%lu %s\n"
+             "其他:%lu %s\n"
              "索引: /szpi/cache/media_index.tsv%s",
              (unsigned long)stats->files,
              (unsigned long)stats->dirs,
              (unsigned long)stats->images, image_size,
              (unsigned long)stats->audio, audio_size,
+             (unsigned long)stats->music,
+             (unsigned long)stats->recordings,
              (unsigned long)stats->videos, video_size,
              (unsigned long)stats->text, text_size,
              (unsigned long)stats->other, other_size,
@@ -5607,6 +5710,9 @@ static void media_detach_page_refs(void)
     s_media_status_label = NULL;
     s_media_info_label = NULL;
     s_media_list = NULL;
+    s_media_filter_button_label = NULL;
+    s_media_prev_button = NULL;
+    s_media_next_button = NULL;
 }
 
 static void media_item_cb(lv_event_t *e)
@@ -5656,54 +5762,45 @@ static void media_populate_list(media_filter_t filter)
     bool have_index = f != NULL;
     media_list_item_t *items[MEDIA_LIST_MAX_ITEMS] = {0};
     size_t count = 0;
-    bool truncated = false;
+    size_t total = 0;
 
     if (have_index) {
         char line[768];
-        if (fgets(line, sizeof(line), f) == NULL) {
-            line[0] = '\0';
-        }
-
         while (fgets(line, sizeof(line), f) != NULL) {
-            char *type_text = line;
-            char *size_text = strchr(type_text, '\t');
-            if (size_text == NULL) {
+            sd_file_type_t type;
+            uint64_t bytes = 0;
+            char *path = NULL;
+            if (!media_parse_index_row(line, &type, &bytes, &path)) {
                 continue;
             }
-            *size_text++ = '\0';
-            char *path = strchr(size_text, '\t');
-            if (path == NULL) {
-                continue;
-            }
-            *path++ = '\0';
-            path[strcspn(path, "\r\n")] = '\0';
-            if (path[0] == '\0') {
+            if (!media_type_matches_filter(type, filter, path)) {
                 continue;
             }
 
-            sd_file_type_t type = media_type_from_index_row(type_text, path);
-            if (!media_type_matches_filter(type, filter)) {
+            if (total++ < s_media_list_offset) {
                 continue;
             }
-
-            if (count >= MEDIA_LIST_MAX_ITEMS) {
-                truncated = true;
-                break;
+            if (count < MEDIA_LIST_MAX_ITEMS) {
+                media_list_item_t *item = calloc(1, sizeof(*item));
+                if (item == NULL) {
+                    break;
+                }
+                strlcpy(item->path, path, sizeof(item->path));
+                item->type = type;
+                item->bytes = bytes;
+                items[count++] = item;
             }
-
-            media_list_item_t *item = calloc(1, sizeof(*item));
-            if (item == NULL) {
-                truncated = true;
-                break;
-            }
-            strlcpy(item->path, path, sizeof(item->path));
-            item->type = type;
-            item->bytes = strtoull(size_text, NULL, 10);
-            items[count++] = item;
         }
         fclose(f);
     }
 
+    if (have_index && total > 0 && count == 0 && s_media_list_offset > 0) {
+        s_media_list_offset = ((total - 1) / MEDIA_LIST_MAX_ITEMS) * MEDIA_LIST_MAX_ITEMS;
+        media_populate_list(filter);
+        return;
+    }
+
+    s_media_total_matches = total;
     lvgl_port_lock(0);
     if (!s_media_page_active || s_media_list == NULL) {
         lvgl_port_unlock();
@@ -5714,6 +5811,23 @@ static void media_populate_list(media_filter_t filter)
     }
 
     media_clear_list_locked();
+    if (s_media_filter_button_label != NULL) {
+        lv_label_set_text(s_media_filter_button_label, media_filter_name(filter));
+    }
+    if (s_media_prev_button != NULL) {
+        if (s_media_list_offset > 0) {
+            lv_obj_clear_state(s_media_prev_button, LV_STATE_DISABLED);
+        } else {
+            lv_obj_add_state(s_media_prev_button, LV_STATE_DISABLED);
+        }
+    }
+    if (s_media_next_button != NULL) {
+        if (s_media_list_offset + count < total) {
+            lv_obj_clear_state(s_media_next_button, LV_STATE_DISABLED);
+        } else {
+            lv_obj_add_state(s_media_next_button, LV_STATE_DISABLED);
+        }
+    }
     if (!have_index) {
         lv_obj_t *btn = lv_list_add_btn(s_media_list, NULL, "先扫描索引");
         lv_list_btn_set_fonts(btn, false);
@@ -5740,10 +5854,17 @@ static void media_populate_list(media_filter_t filter)
     }
 
     if (s_media_status_label != NULL) {
-        lv_label_set_text_fmt(s_media_status_label, "%s: %u%s",
-                              media_filter_name(filter),
-                              (unsigned)s_media_item_count,
-                              truncated ? "+" : "");
+        if (total > 0) {
+            size_t first = s_media_list_offset + 1;
+            size_t last = s_media_list_offset + s_media_item_count;
+            lv_label_set_text_fmt(s_media_status_label, "%s: %u-%u/%u",
+                                  media_filter_name(filter),
+                                  (unsigned)first,
+                                  (unsigned)last,
+                                  (unsigned)total);
+        } else {
+            lv_label_set_text_fmt(s_media_status_label, "%s: 0", media_filter_name(filter));
+        }
     }
     lvgl_port_unlock();
 
@@ -5769,6 +5890,7 @@ static void media_scan_task(void *arg)
 
     ctx.index = fopen(MEDIA_INDEX_PATH, "w");
     if (ctx.index != NULL) {
+        fputs("#SZPI_MEDIA_INDEX_V2\n", ctx.index);
         fputs("type\tsize\tpath\n", ctx.index);
     }
     media_scan_dir(&ctx, SD_MOUNT_POINT, 0);
@@ -5815,17 +5937,45 @@ static void media_start_scan(void)
 static void media_scan_cb(lv_event_t *e)
 {
     if (lv_event_get_code(e) == LV_EVENT_CLICKED) {
+        s_media_list_offset = 0;
         media_start_scan();
     }
 }
 
-static void media_filter_cb(lv_event_t *e)
+static void media_filter_cycle_cb(lv_event_t *e)
 {
     if (lv_event_get_code(e) != LV_EVENT_CLICKED) {
         return;
     }
 
-    s_media_filter = (media_filter_t)(intptr_t)lv_event_get_user_data(e);
+    s_media_filter = (media_filter_t)((s_media_filter + 1) % MEDIA_FILTER_COUNT);
+    s_media_list_offset = 0;
+    media_populate_list(s_media_filter);
+}
+
+static void media_page_prev_cb(lv_event_t *e)
+{
+    if (lv_event_get_code(e) != LV_EVENT_CLICKED) {
+        return;
+    }
+
+    if (s_media_list_offset >= MEDIA_LIST_MAX_ITEMS) {
+        s_media_list_offset -= MEDIA_LIST_MAX_ITEMS;
+    } else {
+        s_media_list_offset = 0;
+    }
+    media_populate_list(s_media_filter);
+}
+
+static void media_page_next_cb(lv_event_t *e)
+{
+    if (lv_event_get_code(e) != LV_EVENT_CLICKED) {
+        return;
+    }
+
+    if (s_media_list_offset + MEDIA_LIST_MAX_ITEMS < s_media_total_matches) {
+        s_media_list_offset += MEDIA_LIST_MAX_ITEMS;
+    }
     media_populate_list(s_media_filter);
 }
 
@@ -5944,15 +6094,23 @@ static void media_create_page(bool auto_scan)
     lv_obj_set_style_text_font(s_media_list, &font_alipuhui20, 0);
     lv_obj_set_scrollbar_mode(s_media_list, LV_SCROLLBAR_MODE_AUTO);
 
-    media_create_button(icon_in_obj, "全", 8, 56, lv_color_hex(0x3662a3), media_filter_cb, (void *)MEDIA_FILTER_ALL);
-    media_create_button(icon_in_obj, "图", 68, 56, lv_color_hex(0x2fa66a), media_filter_cb, (void *)MEDIA_FILTER_IMAGE);
-    media_create_button(icon_in_obj, "音", 128, 56, lv_color_hex(0x4c7bd9), media_filter_cb, (void *)MEDIA_FILTER_AUDIO);
-    media_create_button(icon_in_obj, "文", 188, 56, lv_color_hex(0xc08a34), media_filter_cb, (void *)MEDIA_FILTER_TEXT);
-    media_create_button(icon_in_obj, "扫", 248, 56, lv_color_hex(0x6d5bd0), media_scan_cb, NULL);
+    lv_obj_t *filter_btn = media_create_button(icon_in_obj, media_filter_name(s_media_filter),
+                                               8, 72, lv_color_hex(0x3662a3),
+                                               media_filter_cycle_cb, NULL);
+    s_media_filter_button_label = lv_obj_get_child(filter_btn, 0);
+    s_media_prev_button = media_create_button(icon_in_obj, "上页", 88, 66,
+                                              lv_color_hex(0x2f6f72), media_page_prev_cb, NULL);
+    s_media_next_button = media_create_button(icon_in_obj, "下页", 162, 66,
+                                              lv_color_hex(0x4c7bd9), media_page_next_cb, NULL);
+    media_create_button(icon_in_obj, "扫描", 236, 76, lv_color_hex(0x6d5bd0), media_scan_cb, NULL);
 
     s_media_page_active = true;
     icon_flag = MEDIA_LIBRARY_ICON_FLAG;
-    if (s_media_last_stats.files > 0) {
+    media_index_stats_t persisted_stats = {0};
+    if (media_load_index_stats(&persisted_stats)) {
+        s_media_last_stats = persisted_stats;
+        media_update_ui("已有索引", &s_media_last_stats);
+    } else if (s_media_last_stats.files > 0) {
         media_update_ui("上次索引", &s_media_last_stats);
     }
     media_populate_list(s_media_filter);
@@ -5964,6 +6122,7 @@ static void media_create_page(bool auto_scan)
 static void media_event_handler(lv_event_t *e)
 {
     (void)e;
+    s_media_list_offset = 0;
     media_create_page(true);
 }
 

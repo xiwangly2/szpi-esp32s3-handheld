@@ -127,12 +127,17 @@ lightweight tab-separated index to:
 /szpi/cache/media_index.tsv
 ```
 
-The current index stores file type, byte size, and absolute TF path. It is meant
-as the base for richer media browsing, thumbnails, and incremental background
-updates. The media library can browse the index with `all`, image, audio, and
-text filters. Selecting an indexed item reuses the normal file preview path:
-images, GIFs, and text open in the previewer, while audio opens the full music
-player and returns to the media library when leaving playback.
+The current index stores file type, byte size, and absolute TF path. New index
+files start with a small version comment so future firmware can extend the
+format without breaking old rows. It is meant as the base for richer media
+browsing, thumbnails, and incremental background updates.
+
+The media library can browse the index with `全部`, `图片`, `音乐`, `录音`,
+`视频`, and `文档` filters. The filter button cycles these modes. `上页` and
+`下页` page through the filtered results instead of creating every row at once.
+Selecting an indexed item reuses the normal file preview path: images, GIFs, and
+text open in the previewer, while audio opens the full music player and returns
+to the media library when leaving playback.
 
 The scanner deliberately avoids decoding thumbnails during the scan so it does
 not compete heavily with camera preview, random-image JPEG decode, or audio
