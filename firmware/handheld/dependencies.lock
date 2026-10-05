@@ -40,7 +40,7 @@ dependencies:
       require: private
       version: '>=4.2'
     source:
-      registry_url: https://components.espressif.com
+      registry_url: https://components.espressif.com/
       type: service
     version: 1.7.0
   espressif/esp-sr:
@@ -129,6 +129,16 @@ dependencies:
       registry_url: https://components.espressif.com/
       type: service
     version: 1.4.0
+  espressif/quirc:
+    component_hash: 3be250a06364f0d71a7903b66ac93084d2ce3998c2e75a168b9f1f0621dd6218
+    dependencies:
+    - name: idf
+      require: private
+      version: '>=4.3.0'
+    source:
+      registry_url: https://components.espressif.com/
+      type: service
+    version: 1.2.0
   idf:
     source:
       type: idf
@@ -143,12 +153,14 @@ dependencies:
 direct_dependencies:
 - chmorgan/esp-audio-player
 - chmorgan/esp-file-iterator
+- espressif/esp-dsp
 - espressif/esp-sr
 - espressif/esp32-camera
 - espressif/esp_codec_dev
 - espressif/esp_lcd_touch_ft5x06
 - espressif/esp_lvgl_port
+- espressif/quirc
 - lvgl/lvgl
-manifest_hash: 42ec67df04ef6b6b0df5f734780810178816ed734c175f950c32bf5afaac99fe
+manifest_hash: bf9ea0d3fdf19d010d12f3119fdc7886cb25d246554f31fda1c1aeb0fc9ffd26
 target: esp32s3
 version: 2.0.0

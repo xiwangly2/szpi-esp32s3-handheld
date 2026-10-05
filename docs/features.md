@@ -24,6 +24,13 @@ Touch behavior:
 - swipe left/up/down: refresh
 - GPIO0: refresh while the app is active
 
+## WLAN QR Scan
+
+The WLAN page includes a `扫码` camera action. It recognizes standard Wi-Fi
+sharing QR codes, closes the camera, and connects without entering a password
+on the touch keyboard. Successful connections use the existing NVS/TF history.
+See [supported formats and behavior](wlan-qr.md).
+
 ## Media
 
 The file manager previews JPG, PNG, GIF, text, MP3, and WAV from either the TF

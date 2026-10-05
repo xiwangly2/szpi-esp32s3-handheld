@@ -3,6 +3,7 @@
 #include "esp32_s3_szp.h"
 #include "random_image_app.h"
 #include "device_storage.h"
+#include "wifi_qr_scanner.h"
 #include "esp_partition.h"
 #include "file_iterator.h"
 #include "string.h"
@@ -3283,7 +3284,7 @@ static void btn_camera_save_cb(lv_event_t * e)
 // 进入摄像头应用
 static void camera_event_handler(lv_event_t * e)
 {
-    if (s_camera_running || s_camera_task_handle != NULL) {
+    if (s_camera_running || s_camera_task_handle != NULL || wifi_qr_scanner_is_running()) {
         ESP_LOGW(TAG, "camera is still stopping");
         return;
     }
@@ -3394,8 +3395,8 @@ static EventGroupHandle_t s_wifi_event_group = NULL;
 static QueueHandle_t xQueueWifiAccount = NULL;
 // 队列要传输的内容
 typedef struct {
-    char wifi_ssid[32];  // 获取wifi名称
-    char wifi_password[64]; // 获取wifi密码  
+    char wifi_ssid[33];  // 32-byte SSID plus terminator
+    char wifi_password[65]; // 64-byte PSK plus terminator
     wifi_auth_mode_t authmode;
     uint32_t generation;
     char back_flag; // 是否退出       
@@ -3481,7 +3482,8 @@ static char *wifi_trim(char *text)
     return text;
 }
 
-static void wifi_config_set_credentials(wifi_config_t *config, const char *ssid, const char *password)
+static void wifi_config_set_credentials(wifi_config_t *config, const char *ssid, const char *password,
+                                        wifi_auth_mode_t authmode)
 {
     if (config == NULL) {
         return;
@@ -3490,13 +3492,18 @@ static void wifi_config_set_credentials(wifi_config_t *config, const char *ssid,
     const char *safe_ssid = ssid ? ssid : "";
     const char *safe_password = password ? password : "";
     size_t ssid_len = strnlen(safe_ssid, sizeof(config->sta.ssid));
-    size_t password_len = strnlen(safe_password, sizeof(config->sta.password) - 1);
+    size_t password_len = strnlen(safe_password, sizeof(config->sta.password));
 
     memset(config->sta.ssid, 0, sizeof(config->sta.ssid));
     memset(config->sta.password, 0, sizeof(config->sta.password));
     memcpy(config->sta.ssid, safe_ssid, ssid_len);
     memcpy(config->sta.password, safe_password, password_len);
     config->sta.threshold.authmode = password_len == 0 ? WIFI_AUTH_OPEN : WIFI_AUTH_WPA_PSK;
+    config->sta.scan_method = WIFI_ALL_CHANNEL_SCAN;
+    if (authmode == WIFI_AUTH_WPA3_PSK) {
+        config->sta.threshold.authmode = WIFI_AUTH_WPA3_PSK;
+        config->sta.pmf_cfg.required = true;
+    }
 }
 
 static void wifi_history_upsert(const char *ssid, const char *password, wifi_auth_mode_t authmode)
@@ -3619,7 +3626,11 @@ static void wifi_history_load(void)
     wifi_auth_mode_t authmode = WIFI_AUTH_WPA2_PSK;
 
     while (fgets(line, sizeof(line), f) != NULL) {
-        char *text = wifi_trim(line);
+        line[strcspn(line, "\r\n")] = '\0';
+        char *text = line;
+        while (*text == ' ' || *text == '\t') {
+            text++;
+        }
         if (text[0] == '\0' || text[0] == '#') {
             continue;
         }
@@ -3635,7 +3646,7 @@ static void wifi_history_load(void)
         }
         *eq = '\0';
         char *key = wifi_trim(text);
-        char *value = wifi_trim(eq + 1);
+        char *value = eq + 1;
         if (strcmp(key, "ssid") == 0) {
             snprintf(ssid, sizeof(ssid), "%s", value);
         } else if (strcmp(key, "password") == 0) {
@@ -3844,7 +3855,13 @@ static void lv_wifi_connect(void)
     label_wifi_connect = lv_label_create(wifi_connect_page);
     lv_label_set_text(label_wifi_connect, "WLAN连接中...");
     lv_obj_set_style_text_font(label_wifi_connect, &font_alipuhui20, 0);
-    lv_obj_align(label_wifi_connect, LV_ALIGN_CENTER, 0, -50);
+    lv_obj_set_width(label_wifi_connect, 280);
+    lv_label_set_long_mode(label_wifi_connect, LV_LABEL_LONG_WRAP);
+    lv_obj_set_style_text_align(label_wifi_connect, LV_TEXT_ALIGN_CENTER, 0);
+    lv_obj_align(label_wifi_connect, LV_ALIGN_CENTER, 0, -30);
+    lv_obj_t *spinner = lv_spinner_create(wifi_connect_page, 1000, 60);
+    lv_obj_set_size(spinner, 36, 36);
+    lv_obj_align(spinner, LV_ALIGN_CENTER, 0, 60);
 }
 
 static void wifi_connect_set_status(uint32_t generation, const char *text)
@@ -3908,9 +3925,48 @@ static void wifi_begin_connect(const char *ssid, const char *password, wifi_auth
              (int)wifi_account.authmode,
              wifi_account.wifi_password[0] ? "yes" : "empty");
     lv_wifi_connect(); // 显示wifi连接界面
+    lv_label_set_text_fmt(label_wifi_connect, "正在连接\n%s", ssid);
     if (xQueueSend(queue, &wifi_account, pdMS_TO_TICKS(100)) != pdTRUE) {
         ESP_LOGW(TAG, "wifi connect queue is full");
         wifi_delete_connect_page(generation);
+    }
+}
+
+static void wifi_qr_complete(const wifi_qr_credentials_t *credentials,
+                              uint32_t generation, const char *error)
+{
+    if (!wifi_page_active(generation)) {
+        return;
+    }
+    if (credentials == NULL) {
+        if (label_wifi_scan != NULL && error != NULL) {
+            lv_label_set_text(label_wifi_scan, error);
+        }
+        return;
+    }
+    wifi_auth_mode_t authmode = WIFI_AUTH_WPA_PSK;
+    if (credentials->auth == WIFI_QR_AUTH_OPEN) {
+        authmode = WIFI_AUTH_OPEN;
+    } else if (credentials->auth == WIFI_QR_AUTH_WPA3) {
+        authmode = WIFI_AUTH_WPA3_PSK;
+    }
+    wifi_begin_connect(credentials->ssid, credentials->password, authmode);
+}
+
+static void wifi_qr_button_cb(lv_event_t *e)
+{
+    (void)e;
+    if (!wifi_page_active(s_wifi_page_generation) || xQueueWifiAccount == NULL ||
+        wifi_connect_page != NULL) {
+        return;
+    }
+    if (s_camera_running || s_camera_task_handle != NULL) {
+        lv_label_set_text(label_wifi_scan, "摄像头关闭中...");
+        return;
+    }
+    esp_err_t ret = wifi_qr_scanner_start(wifi_scan_page, s_wifi_page_generation, wifi_qr_complete);
+    if (ret != ESP_OK) {
+        lv_label_set_text(label_wifi_scan, "扫码启动失败");
     }
 }
 
@@ -4368,7 +4424,7 @@ static void wifi_autoconnect_task(void *arg)
             .sae_h2e_identifier = "",
         },
     };
-    wifi_config_set_credentials(&wifi_config, saved->ssid, saved->password);
+    wifi_config_set_credentials(&wifi_config, saved->ssid, saved->password, saved->authmode);
 
     xEventGroupClearBits(s_wifi_event_group, WIFI_CONNECTED_BIT | WIFI_FAIL_BIT);
     s_wifi_retry_num = 0;
@@ -4476,7 +4532,8 @@ static void wifi_connect(void *arg)
                     .sae_h2e_identifier = "",
                     },
             };
-            wifi_config_set_credentials(&wifi_config, wifi_account.wifi_ssid, wifi_account.wifi_password);
+            wifi_config_set_credentials(&wifi_config, wifi_account.wifi_ssid, wifi_account.wifi_password,
+                                        wifi_account.authmode);
 
             esp_err_t ret = wifi_ensure_sta_started();
             if (ret != ESP_OK) {
@@ -4510,7 +4567,7 @@ static void wifi_connect(void *arg)
             /* xEventGroupWaitBits() returns the bits before the call returned, hence we can test which event actually
             * happened. */
             if (bits & WIFI_CONNECTED_BIT) {
-                ESP_LOGI(TAG, "connected to ap SSID:%s password:%s", wifi_config.sta.ssid, wifi_config.sta.password);
+                ESP_LOGI(TAG, "connected to ap SSID:%s", wifi_account.wifi_ssid);
                 wifi_history_upsert(wifi_account.wifi_ssid, wifi_account.wifi_password, wifi_account.authmode);
                 wifi_history_save_all();
                 wifi_save_random_image_config(wifi_account.wifi_ssid, wifi_account.wifi_password);
@@ -4526,17 +4583,17 @@ static void wifi_connect(void *arg)
                 }
                 break; // 跳出while循环删除任务
             } else if (bits & WIFI_FAIL_BIT) {
-                ESP_LOGI(TAG, "Failed to connect to SSID:%s, password:%s", wifi_config.sta.ssid, wifi_config.sta.password);
+                ESP_LOGI(TAG, "failed to connect to SSID:%s", wifi_account.wifi_ssid);
                 wifi_connect_set_status(wifi_account.generation, "WLAN 连接失败");
                 vTaskDelay(1000 / portTICK_PERIOD_MS); // 给上面的显示一点时间
                 wifi_delete_connect_page(wifi_account.generation);
                 xEventGroupClearBits(s_wifi_event_group, WIFI_FAIL_BIT); // 清除此事件标志位
 
             } else {
-                ESP_LOGE(TAG, "UNEXPECTED EVENT");
-                wifi_connect_set_status(wifi_account.generation, "WLAN 连接异常");
+                ESP_LOGW(TAG, "WLAN connection timed out");
+                wifi_connect_set_status(wifi_account.generation, "WLAN 连接超时");
                 vTaskDelay(1000 / portTICK_PERIOD_MS); // 给上面的显示一点时间
-                wifi_close_page(wifi_account.generation, true);
+                wifi_delete_connect_page(wifi_account.generation);
             }
         }
     }
@@ -4666,6 +4723,17 @@ void app_wifi_connect(void *arg)
         goto done;
     }
     s_wifi_connect_task_handle = connect_handle;
+    lv_obj_t *qr_button = lv_btn_create(obj_scan_title);
+    lv_obj_set_size(qr_button, 60, 34);
+    lv_obj_align(qr_button, LV_ALIGN_RIGHT_MID, -2, 0);
+    lv_obj_set_style_bg_opa(qr_button, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_shadow_opa(qr_button, LV_OPA_TRANSP, 0);
+    lv_obj_add_event_cb(qr_button, wifi_qr_button_cb, LV_EVENT_CLICKED, NULL);
+    lv_obj_t *qr_label = lv_label_create(qr_button);
+    lv_label_set_text(qr_label, "扫码");
+    lv_obj_set_style_text_font(qr_label, &font_alipuhui20, 0);
+    lv_obj_set_style_text_color(qr_label, lv_color_white(), 0);
+    lv_obj_center(qr_label);
     lvgl_port_unlock();
 done:
     if (s_wifi_scan_task_handle == xTaskGetCurrentTaskHandle()) {
@@ -4677,6 +4745,10 @@ done:
 // 进入WIFI设置应用
 static void wifiset_event_handler(lv_event_t * e)
 {  
+    if (s_wifi_scan_task_handle != NULL || s_wifi_connect_task_handle != NULL ||
+        wifi_qr_scanner_is_running()) {
+        return;
+    }
     // 创建一个界面对象
     static lv_style_t style;
     lv_style_init(&style);
@@ -4702,6 +4774,9 @@ static void wifiset_event_handler(lv_event_t * e)
     lv_label_set_text(label_wifi_scan, "WLAN扫描中...");
     lv_obj_set_style_text_color(label_wifi_scan, lv_color_hex(0xffffff), 0);
     lv_obj_set_style_text_font(label_wifi_scan, &font_alipuhui20, 0);
+    lv_obj_set_width(label_wifi_scan, 176);
+    lv_obj_set_style_text_align(label_wifi_scan, LV_TEXT_ALIGN_CENTER, 0);
+    lv_label_set_long_mode(label_wifi_scan, LV_LABEL_LONG_SCROLL_CIRCULAR);
     lv_obj_align(label_wifi_scan, LV_ALIGN_CENTER, 0, 0);
 
     icon_flag = 5; // 标记已经进入第5个应用
