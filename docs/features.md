@@ -61,6 +61,11 @@ needed. Leaving the media library cancels an in-flight scan and discards the
 partial index. Opening an indexed entry reuses the same preview and music-player
 paths as the TF card file manager.
 
+JPEG previews share one background decoder with one replaceable pending request.
+Leaving a preview or opening another file cancels stale results, including error
+messages. Rapidly opening images does not start parallel JPEG decoders, and
+returning from a preview keeps the underlying file/media list available.
+
 The TF manager page shows capacity, mounted filesystem, partition table type
 (`GPT`, `MBR`, or raw FAT), and the first few partition entries. It also has a
 guarded quick formatter for the currently mounted volume:

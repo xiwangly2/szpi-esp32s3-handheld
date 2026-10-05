@@ -1139,7 +1139,7 @@ static lv_obj_t *s_preview_body;
 static lv_obj_t *s_preview_media_obj;
 static bool s_preview_fullscreen;
 static bool s_lv_fs_ready;
-static volatile uint32_t s_sd_preview_generation;
+static uint32_t s_sd_preview_generation;
 static size_t s_sd_list_offset;
 static bsp_sdcard_format_t s_sd_format_target = BSP_SDCARD_FORMAT_AUTO;
 static bool s_sd_format_confirm;
@@ -1152,6 +1152,10 @@ typedef struct {
     char path[512];
     uint32_t generation;
 } sd_jpeg_preview_req_t;
+
+// Preview requests and generation are protected by the LVGL lock.
+static sd_jpeg_preview_req_t *s_sd_jpeg_pending;
+static TaskHandle_t s_sd_jpeg_task_handle;
 
 // 函数声明
 esp_err_t list_sdcard_files(char * path);
@@ -1418,15 +1422,26 @@ static void sd_preview_clear_current(void)
     s_preview_media_obj = NULL;
     s_preview_fullscreen = false;
     if (s_preview_img_buf != NULL) {
+        lv_img_cache_invalidate_src(&s_preview_img_dsc);
         heap_caps_free(s_preview_img_buf);
         s_preview_img_buf = NULL;
+        memset(&s_preview_img_dsc, 0, sizeof(s_preview_img_dsc));
     }
+}
+
+static void sd_preview_cancel_pending_locked(void)
+{
+    s_sd_preview_generation++;
+    free(s_sd_jpeg_pending);
+    s_sd_jpeg_pending = NULL;
 }
 
 static void sd_preview_cleanup(void)
 {
-    s_sd_preview_generation++;
+    lvgl_port_lock(0);
+    sd_preview_cancel_pending_locked();
     sd_preview_clear_current();
+    lvgl_port_unlock();
 }
 
 static void sd_preview_back_cb(lv_event_t *e)
@@ -1616,20 +1631,33 @@ static uint16_t *sd_center_crop_canvas(const uint16_t *pixels, int width, int he
     return canvas;
 }
 
-static void sd_preview_jpeg_task(void *arg)
+static bool sd_preview_is_current(uint32_t generation)
 {
-    sd_jpeg_preview_req_t *req = (sd_jpeg_preview_req_t *)arg;
-    char path[512];
-    uint32_t generation = req->generation;
-    snprintf(path, sizeof(path), "%s", req->path);
-    free(req);
+    lvgl_port_lock(0);
+    bool current = generation == s_sd_preview_generation && sdcard_preview_page != NULL;
+    lvgl_port_unlock();
+    return current;
+}
 
-    FILE *f = fopen(path, "rb");
+static void sd_preview_jpeg_error(uint32_t generation, const char *message)
+{
+    lvgl_port_lock(0);
+    if (generation == s_sd_preview_generation && sdcard_preview_page != NULL) {
+        sd_preview_message("JPG预览", message);
+    }
+    lvgl_port_unlock();
+}
+
+static void sd_preview_jpeg_decode(const sd_jpeg_preview_req_t *req)
+{
+    uint32_t generation = req->generation;
+    if (!sd_preview_is_current(generation)) {
+        return;
+    }
+
+    FILE *f = fopen(req->path, "rb");
     if (f == NULL) {
-        if (generation == s_sd_preview_generation) {
-            sd_preview_message("JPG预览", "文件打开失败");
-        }
-        vTaskDelete(NULL);
+        sd_preview_jpeg_error(generation, "文件打开失败");
         return;
     }
     fseek(f, 0, SEEK_END);
@@ -1637,38 +1665,30 @@ static void sd_preview_jpeg_task(void *arg)
     rewind(f);
     if (file_len <= 0 || file_len > SDCARD_IMAGE_PREVIEW_LIMIT) {
         fclose(f);
-        if (generation == s_sd_preview_generation) {
-            sd_preview_message("JPG预览", "图片过大或为空");
-        }
-        vTaskDelete(NULL);
+        sd_preview_jpeg_error(generation, "图片过大或为空");
         return;
     }
     if (!sd_spiram_has_budget((size_t)file_len + SDCARD_JPEG_CANVAS_BYTES)) {
         fclose(f);
-        if (generation == s_sd_preview_generation) {
-            sd_preview_message("JPG预览", "内存余量不足，已跳过预览");
-        }
-        vTaskDelete(NULL);
+        sd_preview_jpeg_error(generation, "内存余量不足，已跳过预览");
         return;
     }
 
     uint8_t *jpeg = heap_caps_malloc(file_len, MALLOC_CAP_8BIT | MALLOC_CAP_SPIRAM);
     if (jpeg == NULL) {
         fclose(f);
-        if (generation == s_sd_preview_generation) {
-            sd_preview_message("JPG预览", "内存不足");
-        }
-        vTaskDelete(NULL);
+        sd_preview_jpeg_error(generation, "内存不足");
         return;
     }
     size_t got = fread(jpeg, 1, file_len, f);
     fclose(f);
     if (got != (size_t)file_len) {
         heap_caps_free(jpeg);
-        if (generation == s_sd_preview_generation) {
-            sd_preview_message("JPG预览", "读取失败");
-        }
-        vTaskDelete(NULL);
+        sd_preview_jpeg_error(generation, "读取失败");
+        return;
+    }
+    if (!sd_preview_is_current(generation)) {
+        heap_caps_free(jpeg);
         return;
     }
 
@@ -1699,14 +1719,15 @@ static void sd_preview_jpeg_task(void *arg)
                     jpeg_cfg.outbuf = (uint8_t *)decoded;
                     jpeg_cfg.outbuf_size = outimg.output_len;
                     ret = esp_jpeg_decode(&jpeg_cfg, &outimg);
-                    if (ret == ESP_OK) {
+                    if (ret == ESP_OK && sd_preview_is_current(generation)) {
                         uint16_t *canvas = sd_center_crop_canvas(decoded, outimg.width, outimg.height,
                                                                  SDCARD_PREVIEW_W, SDCARD_PREVIEW_FULL_H);
                         if (canvas == NULL) {
                             ret = ESP_ERR_NO_MEM;
                         } else {
-                            if (generation == s_sd_preview_generation) {
-                                lvgl_port_lock(0);
+                            // Check after taking the lock: Back may run while decode finishes.
+                            lvgl_port_lock(0);
+                            if (generation == s_sd_preview_generation && sdcard_preview_page != NULL) {
                                 lv_obj_t *body = sd_preview_create_page("JPG预览");
                                 s_preview_img_buf = (uint8_t *)canvas;
                                 s_preview_img_dsc.header.cf = LV_IMG_CF_TRUE_COLOR;
@@ -1720,10 +1741,12 @@ static void sd_preview_jpeg_task(void *arg)
                                 lv_img_set_src(img, &s_preview_img_dsc);
                                 lv_obj_center(img);
                                 sd_preview_enable_fullscreen_toggle(body, img);
-                                lvgl_port_unlock();
-                            } else {
-                                heap_caps_free(canvas);
+                                canvas = NULL;
+                                ESP_LOGI(TAG, "JPEG preview shown: generation=%lu",
+                                         (unsigned long)generation);
                             }
+                            lvgl_port_unlock();
+                            heap_caps_free(canvas);
                         }
                     }
                     heap_caps_free(decoded);
@@ -1732,26 +1755,61 @@ static void sd_preview_jpeg_task(void *arg)
         }
     }
     heap_caps_free(jpeg);
-    if (ret != ESP_OK && generation == s_sd_preview_generation) {
+    if (ret != ESP_OK) {
         ESP_LOGW(TAG, "jpeg preview failed: %s", esp_err_to_name(ret));
-        sd_preview_message("JPG预览", "解码失败");
+        sd_preview_jpeg_error(generation, "解码失败");
+    }
+}
+
+static void sd_preview_jpeg_task(void *arg)
+{
+    (void)arg;
+    for (;;) {
+        lvgl_port_lock(0);
+        sd_jpeg_preview_req_t *req = s_sd_jpeg_pending;
+        s_sd_jpeg_pending = NULL;
+        if (req == NULL) {
+            s_sd_jpeg_task_handle = NULL;
+        }
+        lvgl_port_unlock();
+        if (req == NULL) {
+            break;
+        }
+
+        sd_preview_jpeg_decode(req);
+        ESP_LOGI(TAG, "JPEG preview finished: generation=%lu current=%d stack_free=%u",
+                 (unsigned long)req->generation, sd_preview_is_current(req->generation),
+                 (unsigned)uxTaskGetStackHighWaterMark(NULL));
+        free(req);
     }
     vTaskDelete(NULL);
 }
 
 static void sd_preview_jpeg(const char *path, uint32_t generation)
 {
+    lvgl_port_lock(0);
     sd_preview_message("JPG预览", "载入中...");
     sd_jpeg_preview_req_t *req = malloc(sizeof(*req));
-    if (req != NULL) {
-        snprintf(req->path, sizeof(req->path), "%s", path);
-        req->generation = generation;
+    if (req == NULL) {
+        sd_preview_message("JPG预览", "内存不足");
+        lvgl_port_unlock();
+        return;
     }
-    if (req == NULL ||
-        xTaskCreatePinnedToCore(sd_preview_jpeg_task, "jpg_preview", 8192, req, 4, NULL, 1) != pdPASS) {
-        free(req);
+
+    strlcpy(req->path, path, sizeof(req->path));
+    req->generation = generation;
+    free(s_sd_jpeg_pending);
+    s_sd_jpeg_pending = req;
+    // A running decoder drains only the latest pending request after releasing its buffers.
+    if (s_sd_jpeg_task_handle == NULL &&
+        xTaskCreatePinnedToCore(sd_preview_jpeg_task, "jpg_preview", 8192, NULL, 4,
+                               &s_sd_jpeg_task_handle, 1) != pdPASS) {
+        free(s_sd_jpeg_pending);
+        s_sd_jpeg_pending = NULL;
+        s_sd_jpeg_task_handle = NULL;
         sd_preview_message("JPG预览", "任务创建失败");
     }
+    lvgl_port_unlock();
 }
 
 static bool music_open_from_path(const char *path, bool return_to_sdcard)
@@ -1798,6 +1856,11 @@ static bool music_open_from_path(const char *path, bool return_to_sdcard)
 
 static void sd_preview_file(const char *path, sd_file_type_t type, off_t file_size)
 {
+    lvgl_port_lock(0);
+    sd_preview_cancel_pending_locked();
+    uint32_t generation = s_sd_preview_generation;
+    lvgl_port_unlock();
+
     if (type != SD_FILE_OTHER) {
         media_record_opened(path, type, file_size);
     }
@@ -1817,8 +1880,7 @@ static void sd_preview_file(const char *path, sd_file_type_t type, off_t file_si
             sd_preview_large_file("JPG预览", file_size, SDCARD_IMAGE_PREVIEW_LIMIT);
             break;
         }
-        s_sd_preview_generation++;
-        sd_preview_jpeg(path, s_sd_preview_generation);
+        sd_preview_jpeg(path, generation);
         break;
     case SD_FILE_IMAGE_PNG:
         if (file_size <= 0 || file_size > (off_t)SDCARD_PNG_PREVIEW_LIMIT) {

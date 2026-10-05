@@ -142,6 +142,11 @@ while audio opens the full music player and returns to the media library when
 leaving playback. Long-pressing a media-library row toggles that item in the
 favorites list.
 
+JPEG loading can be cancelled with the preview's back button. A single background
+decoder handles file previews; when images are opened quickly, only the newest
+pending request is retained. A cancelled image or error cannot reopen the preview
+after leaving it or replace a newer file.
+
 Recent and favorite entries are also TSV files under the same cache directory:
 
 ```text
