@@ -17,7 +17,7 @@ Run:
 ```
 
 The doctor script checks the firmware directory, ESP-IDF path, Python venv,
-serial ports, and common Windows upgrade leftovers.
+selected compiler path/version, serial ports, and common Windows upgrade leftovers.
 
 ## Why Not Put ESP-IDF Tools Globally In PATH
 
@@ -26,7 +26,11 @@ tools from another IDF installation, for example a v6.x Python venv or gdb, a
 v5.4.x project may pick up mixed tools. This can lead to confusing build and
 flash errors.
 
-The helper scripts set the required paths only for the current command.
+The helper scripts use the selected IDF's `idf_tools.py export --format key-value`
+to resolve supported tool versions and set paths only for the current command.
+Installing a newer IDF alongside 5.4.x therefore does not select its compiler just
+because that tool directory sorts last. Missing required tools stop the command
+with an error instead of silently falling back to an incompatible version.
 
 ## PROCESSOR_ARCHITECTURE
 

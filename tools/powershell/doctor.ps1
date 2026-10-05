@@ -25,6 +25,13 @@ if ($LASTEXITCODE -ne 0) {
     throw "idf.py --version failed."
 }
 
+$compiler = Get-Command xtensa-esp32s3-elf-gcc.exe -ErrorAction Stop
+Write-Host "Compiler:   $($compiler.Source)"
+& $compiler.Source --version
+if ($LASTEXITCODE -ne 0) {
+    throw "ESP32-S3 compiler version check failed."
+}
+
 Write-Host ""
 Write-Host "Detected serial ports:"
 $ports = @()
@@ -62,7 +69,8 @@ if ($userEspEntries.Count -eq 0 -and $idfRoots.Count -le 1 -and $EspIdfEnvHadPro
     Write-Host "  - No obvious ESP-IDF PATH/version issue detected."
 }
 
-$examplePort = if ($ports.Count -gt 0) { $ports[0].DeviceID } else { "COM7" }
+$usbPort = $ports | Where-Object { $_.Description -match 'USB' } | Select-Object -First 1
+$examplePort = if ($usbPort) { $usbPort.DeviceID } elseif ($ports.Count -gt 0) { $ports[0].DeviceID } else { "COM7" }
 
 Write-Host ""
 Write-Host "Useful next commands:"

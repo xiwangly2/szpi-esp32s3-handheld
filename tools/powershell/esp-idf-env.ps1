@@ -22,29 +22,6 @@ function Add-PathIfExists {
     }
 }
 
-function Add-NewestToolPath {
-    param(
-        [string]$Root,
-        [string]$Tool,
-        [string]$SubPath = ""
-    )
-    $toolRoot = Join-Path $Root "tools\$Tool"
-    if (-not (Test-Path -LiteralPath $toolRoot)) {
-        return
-    }
-
-    $candidate = Get-ChildItem -LiteralPath $toolRoot -Directory -ErrorAction SilentlyContinue |
-        Sort-Object Name -Descending |
-        Select-Object -First 1
-
-    if ($candidate) {
-        Add-PathIfExists (Join-Path $candidate.FullName $SubPath)
-        return
-    }
-
-    Add-PathIfExists (Join-Path $toolRoot $SubPath)
-}
-
 if (-not $env:IDF_PATH) {
     $defaultIdf = "C:\esp\v5.4.4\esp-idf"
     if (Test-Path -LiteralPath $defaultIdf) {
@@ -92,26 +69,24 @@ foreach ($venv in $venvCandidates) {
     }
 }
 
-$toolsRoot = $env:IDF_TOOLS_PATH
-Add-NewestToolPath $toolsRoot "cmake" "bin"
-Add-NewestToolPath $toolsRoot "ninja"
-Add-NewestToolPath $toolsRoot "xtensa-esp-elf" "xtensa-esp-elf\bin"
-Add-NewestToolPath $toolsRoot "xtensa-esp-elf-gdb" "xtensa-esp-elf-gdb\bin"
-Add-NewestToolPath $toolsRoot "esp-clang" "bin"
-Add-NewestToolPath $toolsRoot "idf-exe"
-Add-NewestToolPath $toolsRoot "openocd-esp32" "openocd-esp32\bin"
-Add-NewestToolPath $toolsRoot "dfu-util" "dfu-util-0.11-win64"
-Add-NewestToolPath $toolsRoot "ccache" "ccache-4.12.1-windows-x86_64"
+$idfToolsPy = Join-Path $env:IDF_PATH "tools\idf_tools.py"
+if (-not (Test-Path -LiteralPath $idfToolsPy)) {
+    throw "Cannot find idf_tools.py under IDF_PATH: $env:IDF_PATH"
+}
 
-if (-not $env:ESP_ROM_ELF_DIR) {
-    $romRoot = Join-Path $toolsRoot "tools\esp-rom-elfs"
-    if (Test-Path -LiteralPath $romRoot) {
-        $rom = Get-ChildItem -LiteralPath $romRoot -Directory -ErrorAction SilentlyContinue |
-            Sort-Object Name -Descending |
-            Select-Object -First 1
-        if ($rom) {
-            $env:ESP_ROM_ELF_DIR = $rom.FullName
+# Let the selected IDF resolve supported tool versions, not the newest directory.
+$idfExports = & $EspIdfPython $idfToolsPy export --format key-value
+if ($LASTEXITCODE -ne 0) {
+    throw "ESP-IDF tool export failed. Install the tools required by $env:IDF_PATH."
+}
+foreach ($line in $idfExports) {
+    if ($line -match '^([A-Z][A-Z0-9_]*)=(.*)$') {
+        $name = $Matches[1]
+        $value = $Matches[2]
+        if ($name -eq "PATH") {
+            $value = $value.Replace('%PATH%', $env:PATH)
         }
+        [Environment]::SetEnvironmentVariable($name, $value, 'Process')
     }
 }
 
