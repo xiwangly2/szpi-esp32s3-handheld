@@ -174,27 +174,47 @@ static void audio_task(void *arg)
 {
     video_session_t *s = arg;
     uint32_t bytes_per_second = s->audio_info.sample_rate * s->audio_info.channel * 2;
-    while (!interrupted(s)) {
+    uint64_t sent_bytes = 0;
+    uint32_t packets = 0;
+    int16_t *stereo = heap_caps_malloc(2048, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (stereo == NULL) { atomic_store(&s->audio_error, true); }
+    while (!interrupted(s) && !atomic_load(&s->audio_error)) {
         esp_extractor_frame_info_t frame = {0};
         esp_extractor_err_t ret = esp_extractor_read_frame(s->audio.extractor, &frame);
         if (ret == ESP_EXTRACTOR_ERR_EOS) { break; }
         if (ret != ESP_EXTRACTOR_ERR_OK) { atomic_store(&s->audio_error, true); break; }
         bool eos = EXTRACTOR_IS_EOS(frame.frame_flag);
         if (frame.stream_type == ESP_EXTRACTOR_STREAM_TYPE_AUDIO && frame.frame_size > 0) {
+            if (packets < 3) {
+                ESP_LOGI(TAG, "PCM packet: pts=%lu bytes=%lu", (unsigned long)frame.pts, (unsigned long)frame.frame_size);
+            }
+            packets++;
             if (frame.frame_size > VIDEO_MAX_FRAME || frame.frame_buffer == NULL ||
                 frame.frame_size % (2 * s->audio_info.channel) != 0) {
                 atomic_store(&s->audio_error, true);
             } else {
                 for (size_t pos = 0; pos < frame.frame_size && !interrupted(s);) {
-                    int64_t pts = (int64_t)frame.pts * 1000 + (int64_t)pos * 1000000 / bytes_per_second;
+                    int64_t pts = (int64_t)(sent_bytes * 1000000 / bytes_per_second);
                     if (!wait_for_pts(s, pts > 30000 ? pts - 30000 : 0)) { break; }
                     size_t bytes = frame.frame_size - pos;
-                    if (bytes > 2048) { bytes = 2048; }
+                    if (bytes > 1024) { bytes = 1024; }
+                    void *output = frame.frame_buffer + pos;
+                    size_t output_bytes = bytes;
+                    if (s->audio_info.channel == 1) {
+                        const int16_t *mono = (const int16_t *)(frame.frame_buffer + pos);
+                        for (size_t i = 0; i < bytes / 2; i++) {
+                            stereo[i * 2] = mono[i];
+                            stereo[i * 2 + 1] = mono[i];
+                        }
+                        output = stereo;
+                        output_bytes = bytes * 2;
+                    }
                     size_t written = 0;
-                    if (bsp_i2s_write(frame.frame_buffer + pos, bytes, &written, 100) != ESP_OK || written != bytes) {
+                    if (bsp_i2s_write(output, output_bytes, &written, 100) != ESP_OK || written != output_bytes) {
                         atomic_store(&s->audio_error, true); break;
                     }
                     pos += bytes;
+                    sent_bytes += bytes;
                 }
             }
         }
@@ -202,8 +222,10 @@ static void audio_task(void *arg)
         if (eos || atomic_load(&s->audio_error)) { break; }
     }
     if (!interrupted(s)) { vTaskDelay(pdMS_TO_TICKS(80)); }
+    free(stereo);
     source_close(&s->audio);
-    ESP_LOGI(TAG, "audio stopped: error=%d stack_free=%u", atomic_load(&s->audio_error),
+    ESP_LOGI(TAG, "audio stopped: error=%d packets=%lu sent=%llu stack_free=%u", atomic_load(&s->audio_error),
+             (unsigned long)packets, (unsigned long long)sent_bytes,
              (unsigned)uxTaskGetStackHighWaterMark(NULL));
     atomic_store(&s->audio_done, true);
     vTaskDelete(NULL);
@@ -236,7 +258,7 @@ static const char *play_file(video_session_t *s)
             result = "音轨读取失败"; goto done;
         }
         s->audio_info = audio_info.audio_info;
-        if (bsp_speaker_playback_start(s->audio_info.sample_rate, 16, s->audio_info.channel) != ESP_OK) {
+        if (bsp_codec_set_fs(s->audio_info.sample_rate, 16, I2S_SLOT_MODE_STEREO) != ESP_OK) {
             result = "音频初始化失败"; source_close(&s->audio); goto done;
         }
     }
@@ -271,6 +293,15 @@ static const char *play_file(video_session_t *s)
         bool eos = EXTRACTOR_IS_EOS(frame.frame_flag);
         bool decode_ok = true;
         if (frame.stream_type == ESP_EXTRACTOR_STREAM_TYPE_VIDEO && frame.frame_size > 0) {
+            bool paused;
+            int64_t lateness = elapsed_us(s, &paused) - (int64_t)frame.pts * 1000;
+            if (!paused && lateness > 1000000 / info.video_info.fps && s->shown > 0) {
+                s->dropped++;
+                esp_extractor_release_frame(video.extractor, &frame);
+                vTaskDelay(1);
+                if (eos) { break; }
+                continue;
+            }
             esp_jpeg_image_cfg_t cfg = {
                 .indata = frame.frame_buffer, .indata_size = frame.frame_size,
                 .out_format = JPEG_IMAGE_FORMAT_RGB565, .out_scale = JPEG_IMAGE_SCALE_0,
@@ -284,13 +315,8 @@ static const char *play_file(video_session_t *s)
                         image_info.height <= 240 && image_info.output_len <= VIDEO_PIXELS * 2;
             if (decode_ok) { decode_ok = esp_jpeg_decode(&cfg, &image_info) == ESP_OK; }
             if (decode_ok && wait_for_pts(s, (int64_t)frame.pts * 1000)) {
-                bool paused;
-                int64_t lateness = elapsed_us(s, &paused) - (int64_t)frame.pts * 1000;
                 lvgl_port_lock(0);
                 if (s->image != NULL && !interrupted(s)) {
-                    if (lateness > 2000000 / info.video_info.fps && s->shown > 0) {
-                        s->dropped++;
-                    } else {
                         memcpy(s->display, s->pixels, image_info.output_len);
                         s->image_desc.header.cf = LV_IMG_CF_TRUE_COLOR;
                         s->image_desc.header.w = image_info.width;
@@ -301,7 +327,6 @@ static const char *play_file(video_session_t *s)
                         lv_obj_center(s->image);
                         lv_obj_invalidate(s->image);
                         s->shown++;
-                    }
                 }
                 lvgl_port_unlock();
             }
