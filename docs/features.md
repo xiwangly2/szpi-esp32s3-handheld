@@ -34,8 +34,9 @@ See [supported formats and behavior](wlan-qr.md).
 ## Media
 
 The file manager previews JPG, PNG, GIF, text, MP3, and WAV from either the TF
-card or the on-board `/local` filesystem. Video files are currently detected as
-media but not played.
+card or the on-board `/local` filesystem. Converted MJPEG/PCM AVI files open in
+the video player with audio, pause/restart, volume, and tap-to-toggle full screen.
+See [video conversion, TF playback, and backend caching](video.md).
 
 Large previews are guarded before LVGL receives the file:
 
@@ -176,5 +177,5 @@ Bluetooth audio module connected by I2S or UART.
 
 Exploratory directions are intentionally tracked as future work until they are
 stable on real hardware: BLE Audio or external A2DP/HFP audio module support,
-USB plug-and-play camera, short video playback, camera recording, thumbnail
+USB plug-and-play camera, broader video codecs, camera recording, thumbnail
 generation, and incremental background indexing.

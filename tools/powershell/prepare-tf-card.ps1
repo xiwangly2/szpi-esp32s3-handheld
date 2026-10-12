@@ -21,8 +21,9 @@ $configDir = Join-Path $root "szpi\config"
 $cacheDir = Join-Path $root "szpi\cache\random"
 $photoDir = Join-Path $root "szpi\photos"
 $musicDir = Join-Path $root "szpi\music"
+$videoDir = Join-Path $root "szpi\videos"
 
-New-Item -ItemType Directory -Force -Path $configDir, $cacheDir, $photoDir, $musicDir | Out-Null
+New-Item -ItemType Directory -Force -Path $configDir, $cacheDir, $photoDir, $musicDir, $videoDir | Out-Null
 
 $wifiIni = Join-Path $configDir "wifi.ini"
 @"

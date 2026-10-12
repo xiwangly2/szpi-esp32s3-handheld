@@ -81,6 +81,13 @@ dependencies:
       registry_url: https://components.espressif.com/
       type: service
     version: 1.3.6
+  espressif/esp_extractor:
+    component_hash: d2e99ae3e45f2d3b0b35d5615e0ef32d5b813daed6f79253aab94b6e76445086
+    dependencies: []
+    source:
+      registry_url: https://components.espressif.com/
+      type: service
+    version: 1.0.7
   espressif/esp_jpeg:
     component_hash: defb83669293cbf86d0fa86b475ba5517aceed04ed70db435388c151ab37b5d7
     dependencies:
@@ -157,10 +164,11 @@ direct_dependencies:
 - espressif/esp-sr
 - espressif/esp32-camera
 - espressif/esp_codec_dev
+- espressif/esp_extractor
 - espressif/esp_lcd_touch_ft5x06
 - espressif/esp_lvgl_port
 - espressif/quirc
 - lvgl/lvgl
-manifest_hash: bf9ea0d3fdf19d010d12f3119fdc7886cb25d246554f31fda1c1aeb0fc9ffd26
+manifest_hash: c3caed6d83d87094b1f6d6840a7455e0a458a9e545c3bdc9818fd91e178f0d55
 target: esp32s3
 version: 2.0.0

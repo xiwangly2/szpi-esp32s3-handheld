@@ -1,0 +1,3 @@
+# Optional HTTP(S) URL serving a converted MJPEG + PCM AVI file.
+# Rename to video.ini and set your own URL.
+url=https://example.com/video/video.php?key=change-me&file=BadApple.avi

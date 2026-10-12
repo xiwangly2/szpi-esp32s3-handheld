@@ -21,6 +21,8 @@ backend/image-api/config.php
 backend/image-api/images/
 backend/image-api/bz/
 backend/image-api/background/
+backend/video-api/config.php
+backend/video-api/media/
 
 # Runtime TF-card data copied back from devices
 examples/tf-card/szpi/cache/

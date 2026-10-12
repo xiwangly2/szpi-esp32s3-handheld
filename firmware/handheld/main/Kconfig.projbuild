@@ -52,3 +52,12 @@ menu "Random Image LVGL App"
             Number of random images to try before showing an error.
 
 endmenu
+
+menu "Handheld Video Player"
+    config HANDHELD_VIDEO_URL
+        string "Default AVI download URL (optional)"
+        default ""
+        help
+            HTTP(S) URL serving a converted MJPEG/PCM AVI file. A url= entry in
+            /sdcard/szpi/config/video.ini overrides it. Keep personal URLs out of git.
+endmenu

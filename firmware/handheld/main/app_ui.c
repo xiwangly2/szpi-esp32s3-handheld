@@ -4,6 +4,7 @@
 #include "random_image_app.h"
 #include "device_storage.h"
 #include "wifi_qr_scanner.h"
+#include "video_player.h"
 #include "esp_partition.h"
 #include "file_iterator.h"
 #include "string.h"
@@ -1902,11 +1903,11 @@ static void sd_preview_file(const char *path, sd_file_type_t type, off_t file_si
         break;
     case SD_FILE_VIDEO:
         {
-            char size_text[24];
-            char message[96];
-            sd_format_file_size(size_text, sizeof(size_text), file_size);
-            snprintf(message, sizeof(message), "暂未支持视频播放\n文件大小: %s", size_text);
-            sd_preview_message("视频文件", message);
+            sd_preview_cleanup();
+            music_player_release();
+            if (handheld_video_open(path, &g_sys_volume, NULL) != ESP_OK) {
+                sd_preview_message("视频文件", "播放器启动失败");
+            }
         }
         break;
     default:
@@ -6700,6 +6701,21 @@ static lv_style_t s_home_bg_style;
 static lv_style_t s_home_button_style;
 static lv_style_t s_home_button_pressed_style;
 
+static void video_home_closed(void)
+{
+    if (icon_flag == 12) { icon_flag = 0; }
+}
+
+static void video_event_handler(lv_event_t *e)
+{
+    (void)e;
+    if (handheld_video_is_open()) { return; }
+    music_player_release();
+    if (handheld_video_open(NULL, &g_sys_volume, video_home_closed) == ESP_OK) {
+        icon_flag = 12;
+    }
+}
+
 static const home_app_item_t s_home_apps[] = {
     { "随机图", "API",    0x2fa66a, HOME_ICON_SYMBOL, LV_SYMBOL_IMAGE,   random_image_app_event_handler },
     { "姿态",   "QMI8658", 0xf06d2f, HOME_ICON_IMAGE,  &img_att_icon,     att_event_handler },
@@ -6712,6 +6728,7 @@ static const home_app_item_t s_home_apps[] = {
     { "WLAN",   "Scan",   0xc85a5a, HOME_ICON_IMAGE,  &img_wifiset_icon, wifiset_event_handler },
     { "蓝牙",   "HID",    0xa36bb8, HOME_ICON_IMAGE,  &img_btset_icon,   btset_event_handler },
     { "本机存储", "Flash", 0x397d61, HOME_ICON_IMAGE, &img_sd_icon,      local_storage_event_handler },
+    { "视频",   "Video",  0x287c88, HOME_ICON_SYMBOL, LV_SYMBOL_VIDEO, video_event_handler },
 };
 
 static uint8_t home_page_count(void)

@@ -1,6 +1,7 @@
 idf_component_register(SRCS "esp32_s3_szp.c" "main.c" "app_ui.c" "random_image_app.c"
                        SRCS "device_storage.c" "sdcard_layout.c"
                        SRCS "wifi_qr_payload.c" "wifi_qr_scanner.c"
+                       SRCS "video_player.c" "extractor_log_compat.c"
                        SRCS "assets/img_att_icon.c"
                        SRCS "assets/img_btset_icon.c"
                        SRCS "assets/img_camera_icon.c"
@@ -13,3 +14,7 @@ idf_component_register(SRCS "esp32_s3_szp.c" "main.c" "app_ui.c" "random_image_a
                        INCLUDE_DIRS "bt")
 
 target_compile_options(${COMPONENT_LIB} PRIVATE -Wno-unused-const-variable)
+
+# The prebuilt extractor archive is linked after the component archive group.
+# Keep its logging entry point (the IDF 5.4 adapter or the native newer API).
+target_link_options(${COMPONENT_LIB} INTERFACE "-Wl,--undefined=esp_log")

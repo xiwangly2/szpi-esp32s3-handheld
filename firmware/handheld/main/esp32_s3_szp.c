@@ -728,6 +728,8 @@ esp_err_t bsp_sdcard_prepare_product_dirs(void)
     mkdir(SD_MOUNT_POINT "/szpi/music", 0775);
     mkdir(SD_MOUNT_POINT "/szpi/photos", 0775);
     mkdir(SD_MOUNT_POINT "/szpi/recordings", 0775);
+    mkdir(SD_MOUNT_POINT "/szpi/videos", 0775);
+    mkdir(SD_MOUNT_POINT "/szpi/cache/video", 0775);
     return ESP_OK;
 }
 
