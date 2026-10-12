@@ -12,6 +12,11 @@
 
 ## Toolchain
 
+Install Git LFS before cloning, then run `git lfs install` and `git lfs pull`
+inside the checkout. The large generated Chinese font and binary media/assets
+are tracked through LFS. A pointer-only source archive cannot build the firmware.
+Build outputs and personal converted videos remain ignored by Git.
+
 This project has been verified locally with ESP-IDF v5.4.4 on Windows.
 
 Run the project doctor first:

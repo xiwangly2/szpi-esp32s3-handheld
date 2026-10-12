@@ -10,6 +10,12 @@ if (-not (Test-Path -LiteralPath $project)) {
     throw "Firmware project not found."
 }
 
+$fontSource = Join-Path $project 'main\assets\font_alipuhui20.c'
+if (-not (Test-Path -LiteralPath $fontSource) -or
+    (Get-Content -LiteralPath $fontSource -TotalCount 1) -eq 'version https://git-lfs.github.com/spec/v1') {
+    throw 'Chinese font data is missing. Install Git LFS, then run git lfs install and git lfs pull.'
+}
+
 . "$PSScriptRoot\esp-idf-env.ps1"
 
 $idfPy = Join-Path $env:IDF_PATH "tools\idf.py"
