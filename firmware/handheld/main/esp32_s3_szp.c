@@ -1507,6 +1507,22 @@ esp_err_t bsp_speaker_set_fs(uint32_t rate, uint32_t bits_cfg, i2s_slot_mode_t c
     return ret;
 }
 
+esp_err_t bsp_speaker_playback_start(uint32_t rate, uint32_t bits_cfg, i2s_slot_mode_t ch)
+{
+    if (play_dev_handle == NULL) {
+        return ESP_ERR_INVALID_STATE;
+    }
+    // RX and TX share the I2S clock. Stop the idle microphone before changing TX.
+    esp_err_t ret = record_dev_handle != NULL ? esp_codec_dev_close(record_dev_handle) : ESP_OK;
+    if (ret != ESP_OK) { return ret; }
+    ret = esp_codec_dev_close(play_dev_handle);
+    if (ret != ESP_OK) { return ret; }
+    esp_codec_dev_sample_info_t fs = {
+        .sample_rate = rate, .channel = ch, .bits_per_sample = bits_cfg,
+    };
+    return esp_codec_dev_open(play_dev_handle, &fs);
+}
+
 // 音频芯片初始化
 esp_err_t bsp_codec_init(void)
 {

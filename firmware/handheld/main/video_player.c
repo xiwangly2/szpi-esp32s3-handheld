@@ -88,7 +88,8 @@ static bool wait_for_pts(video_session_t *s, int64_t target_us)
         bool paused;
         int64_t elapsed = elapsed_us(s, &paused);
         if (!paused && elapsed >= target_us) { return true; }
-        vTaskDelay(pdMS_TO_TICKS(5));
+        // At 100 Hz, pdMS_TO_TICKS(5) is zero and would starve the idle task.
+        vTaskDelay(1);
     }
     return false;
 }
@@ -214,7 +215,13 @@ static const char *play_file(video_session_t *s)
     esp_extractor_stream_info_t info = {0}, audio_info = {0};
     const char *result = "播放结束";
     bool audio_started = false;
-    if (!source_open(&video, s, s->path, ESP_EXTRACT_MASK_AV) || !video_info_valid(&video, &info)) {
+    struct stat st;
+    if (stat(s->path, &st) != 0) { result = "未找到视频文件"; goto done; }
+    if (st.st_size > VIDEO_MAX_BYTES) { result = "视频超过256MB"; goto done; }
+    if (!source_open(&video, s, s->path, ESP_EXTRACT_MASK_AV)) {
+        result = "AVI文件读取失败"; goto done;
+    }
+    if (!video_info_valid(&video, &info)) {
         result = "需要320x240 MJPEG AVI"; goto done;
     }
     uint16_t audio_count = 0;
@@ -229,7 +236,7 @@ static const char *play_file(video_session_t *s)
             result = "音轨读取失败"; goto done;
         }
         s->audio_info = audio_info.audio_info;
-        if (bsp_speaker_set_fs(s->audio_info.sample_rate, 16, s->audio_info.channel) != ESP_OK) {
+        if (bsp_speaker_playback_start(s->audio_info.sample_rate, 16, s->audio_info.channel) != ESP_OK) {
             result = "音频初始化失败"; source_close(&s->audio); goto done;
         }
     }
@@ -308,7 +315,7 @@ static const char *play_file(video_session_t *s)
                      (unsigned long)s->shown, (unsigned long)s->dropped);
             next_report = esp_timer_get_time() + 5000000;
         }
-        taskYIELD();
+        vTaskDelay(1);
     }
 done:
     if (strcmp(result, "播放结束") != 0 || interrupted(s)) { atomic_store(&s->stop_media, true); }
@@ -443,7 +450,7 @@ static void video_task(void *arg)
         if (s->select_default) {
             strlcpy(s->path, access(VIDEO_DEFAULT, F_OK) == 0 ? VIDEO_DEFAULT : VIDEO_CACHE, sizeof(s->path));
             if (access(s->path, F_OK) != 0 && load_url(s)) { command = COMMAND_DOWNLOAD; }
-            s->select_default = false;
+            s->select_default = access(s->path, F_OK) != 0;
         }
         if (command == COMMAND_DOWNLOAD) {
             set_status(s, "连接视频来源...");
@@ -459,7 +466,7 @@ static void video_task(void *arg)
     }
     if (registered) { esp_avi_extractor_unregister(); }
     bsp_codec_mute_set(true);
-    bsp_speaker_set_fs(CODEC_DEFAULT_SAMPLE_RATE, 16, CODEC_DEFAULT_CHANNEL);
+    bsp_codec_set_fs(CODEC_DEFAULT_SAMPLE_RATE, 16, CODEC_DEFAULT_CHANNEL);
     lvgl_port_lock(0);
     if (s->timer != NULL) { lv_timer_del(s->timer); }
     if (s->page != NULL) { lv_obj_del(s->page); }
