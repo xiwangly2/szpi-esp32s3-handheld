@@ -1,0 +1,26 @@
+{
+  "name": "szpi-serverless-media",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "test": "node --test test/*.test.mjs",
+    "build": "node tools/build.mjs",
+    "deploy:aws": "node tools/deploy-aws.mjs",
+    "upload": "node tools/upload.mjs"
+  },
+  "dependencies": {
+    "@aws-sdk/client-s3": "3.1149.0",
+    "@aws-sdk/s3-request-presigner": "3.1149.0",
+    "ali-oss": "6.23.0",
+    "aws4fetch": "1.0.20",
+    "cos-nodejs-sdk-v5": "3.0.0",
+    "xml2js": "0.6.2"
+  },
+  "devDependencies": {
+    "esbuild": "0.28.2"
+  }
+}

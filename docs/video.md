@@ -41,6 +41,12 @@ Playback stops at the end. The restart button starts again from the beginning.
 
 ## Backend Source
 
+The [portable Serverless backend](../backend/serverless-media/README.md) provides
+Terraform modules for AWS, Cloudflare, Tencent, and Alibaba. AWS deployment and
+full-file transfer have been verified; the other modules are statically
+validated templates. A generated `.deploy/video.ini` contains the device's
+read-only URL. The existing PHP endpoint below remains an alternative.
+
 Upload the **converted AVI**, not the original MP4, using the separate
 [PHP endpoint](../backend/video-api/README.md), or serve the AVI as a static
 HTTP(S) file. Create `/szpi/config/video.ini` on the card:

@@ -73,10 +73,15 @@ PHP API 默认 key 是 `change-me`，部署时复制 `backend/image-api/config.s
 - [VS Code ESP-IDF](docs/vscode-esp-idf.md)
 - [Windows Environment](docs/windows-environment.md)
 - [Feature Notes](docs/features.md)
+- [视频播放与转码](docs/video.md)
+- [Serverless 多云后端与 Terraform 部署](backend/serverless-media/README.md)
 - [Roadmap](docs/roadmap.md)
 - [Release Build](docs/release.md)
 
 ## 开源发布建议
+
+本仓库使用 Git LFS 跟踪大型生成字体及音视频等资源。克隆后运行
+`git lfs install` 和 `git lfs pull`，再开始构建。
 
 源码仓库只提交可复现源代码和模板。生成的固件位于 `release/`，默认被
 `.gitignore` 排除，更适合上传到 GitHub/Gitea Release。

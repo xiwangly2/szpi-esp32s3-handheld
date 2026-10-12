@@ -1,0 +1,10 @@
+node_modules/
+dist/
+.deploy/
+.dev.vars
+**/.terraform/
+**/*.tfstate*
+**/*.tfvars
+**/*.tfvars.json
+**/*.tfplan
+!**/example.tfvars
