@@ -1548,6 +1548,21 @@ esp_err_t bsp_codec_volume_set(int volume, int *volume_set)
     return ret;
 }
 
+void bsp_codec_log_playback_state(void)
+{
+    int volume = -1;
+    bool muted = true;
+    int vol_ret = esp_codec_dev_get_out_vol(play_dev_handle, &volume);
+    int mute_ret = esp_codec_dev_get_out_mute(play_dev_handle, &muted);
+    ESP_LOGI(TAG, "speaker state: volume=%d mute=%d read_status=%d/%d", volume, muted, vol_ret, mute_ret);
+    const uint8_t regs[] = {0x00, 0x01, 0x02, 0x05, 0x09, 0x0d, 0x0e, 0x12, 0x31, 0x32, 0x37};
+    for (size_t i = 0; i < sizeof(regs); i++) {
+        int value = 0;
+        int ret = esp_codec_dev_read_reg(play_dev_handle, regs[i], &value);
+        ESP_LOGI(TAG, "speaker reg %02x=%02x status=%d", regs[i], value, ret);
+    }
+}
+
 // 获取MIC通道数
 int bsp_get_feed_channel(void)
 {

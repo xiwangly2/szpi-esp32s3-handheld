@@ -176,6 +176,8 @@ static void audio_task(void *arg)
     uint32_t bytes_per_second = s->audio_info.sample_rate * s->audio_info.channel * 2;
     uint64_t sent_bytes = 0;
     uint32_t packets = 0;
+    uint32_t peak = 0;
+    uint32_t next_report = bytes_per_second * 5;
     int16_t *stereo = heap_caps_malloc(2048, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
     if (stereo == NULL) { atomic_store(&s->audio_error, true); }
     while (!interrupted(s) && !atomic_load(&s->audio_error)) {
@@ -200,6 +202,12 @@ static void audio_task(void *arg)
                     if (bytes > 1024) { bytes = 1024; }
                     void *output = frame.frame_buffer + pos;
                     size_t output_bytes = bytes;
+                    for (size_t i = 0; i < bytes; i += 2) {
+                        const uint8_t *pcm = frame.frame_buffer + pos + i;
+                        int32_t sample = (int16_t)((uint16_t)pcm[0] | ((uint16_t)pcm[1] << 8));
+                        uint32_t magnitude = (uint32_t)(sample < 0 ? -sample : sample);
+                        if (magnitude > peak) { peak = magnitude; }
+                    }
                     if (s->audio_info.channel == 1) {
                         const int16_t *mono = (const int16_t *)(frame.frame_buffer + pos);
                         for (size_t i = 0; i < bytes / 2; i++) {
@@ -215,6 +223,13 @@ static void audio_task(void *arg)
                     }
                     pos += bytes;
                     sent_bytes += bytes;
+                    if (sent_bytes >= next_report) {
+                        ESP_LOGI(TAG, "PCM output: sent=%llu peak=%lu", (unsigned long long)sent_bytes,
+                                 (unsigned long)peak);
+                        if (next_report == bytes_per_second * 5) { bsp_codec_log_playback_state(); }
+                        next_report += bytes_per_second * 5;
+                        peak = 0;
+                    }
                 }
             }
         }
@@ -271,6 +286,8 @@ static const char *play_file(video_session_t *s)
     if (s->play_label != NULL) { lv_label_set_text(s->play_label, LV_SYMBOL_PAUSE); }
     bsp_codec_volume_set(*s->volume, NULL);
     bsp_codec_mute_set(s->muted);
+    ESP_LOGI(TAG, "audio setup: rate=%lu source_channels=%u volume=%u muted=%d",
+             (unsigned long)s->audio_info.sample_rate, s->audio_info.channel, *s->volume, s->muted);
     lvgl_port_unlock();
     if (audio_count > 0) {
         atomic_store(&s->audio_done, false);

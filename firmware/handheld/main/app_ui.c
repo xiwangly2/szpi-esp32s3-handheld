@@ -560,6 +560,7 @@ static esp_err_t _audio_player_mute_fn(AUDIO_PLAYER_MUTE_SETTING setting)
     // 如果不是静音 设置音量
     if (setting == AUDIO_PLAYER_UNMUTE) {
         bsp_codec_volume_set(g_sys_volume, NULL);
+        bsp_codec_log_playback_state();
     }
     ret = ESP_OK;
 
