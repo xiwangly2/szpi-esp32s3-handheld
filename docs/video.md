@@ -102,11 +102,19 @@ amplifier enable bit as well as codec mute/volume.
   PCM track or codec mute. A trial changing codec initialization order did
   not fix it and was reverted. The video timing logs measured about 53-55 ms
   decoding, 4.5-5.4 ms extraction, and 5.7 ms submission per processed frame.
-- `d013440`: SIMD decoder and aligned buffer swapping build, flash, boot,
-  and release packaging passed on the connected ESP32-S3. Playback timing,
-  visible rendering, sound, full-length playback, and rapid exit/reopen still
-  need device validation for this revision; no faster frame rate is claimed
-  from the upstream decoder benchmark alone.
+- `d013440`: the user confirmed smoother playback, sound, and controls. Typical
+  JPEG decode time fell to 9-11 ms and submission to about 0.5 ms. The stream
+  reached more than two minutes with no dropped frames, but then the UI froze.
+  The captured PC was in LVGL's `draw_buf_flush` wait; both media tasks waited
+  for the LVGL mutex. This revision did **not** pass the full-length gate.
+- The display adapter now drains queued SPI transfers before returning the
+  draw buffer from the LVGL task. It does not pretend DMA has completed on a
+  timer. Repeat full-length and cross-app checks after this change.
+- Default OpenOCD GDB attachment can reset this protected target while probing
+  flash. Such debug-induced resets are not playback crash evidence. For a
+  non-flashing attachment, set `ESP_FLASH_SIZE` to `0` before loading the board
+  configuration and disable the GDB memory map; do not disable firmware memory
+  protection just to inspect a task stack.
 - The clock host test and Git LFS integrity check passed. Existing TF media
   can be reused; the optimized decoder does not require another conversion.
 

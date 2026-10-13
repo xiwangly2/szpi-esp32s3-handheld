@@ -390,6 +390,19 @@ static esp_lcd_touch_handle_t tp;   // 触摸屏句柄
 static lv_disp_t *disp;      // 指向液晶屏
 static lv_indev_t *disp_indev = NULL; // 指向触摸屏
 
+static void bsp_lcd_flush(lv_disp_drv_t *driver, const lv_area_t *area, lv_color_t *pixels)
+{
+    esp_err_t draw_ret = esp_lcd_panel_draw_bitmap(panel_handle, area->x1, area->y1,
+                                                  area->x2 + 1, area->y2 + 1, pixels);
+    // A commandless parameter transfer drains queued SPI color transactions.
+    // Return the buffer from the LVGL task only after DMA no longer owns it.
+    esp_err_t drain_ret = esp_lcd_panel_io_tx_param(io_handle, -1, NULL, 0);
+    if (draw_ret != ESP_OK || drain_ret != ESP_OK) {
+        ESP_LOGE(TAG, "LCD flush failed: draw=%s drain=%s", esp_err_to_name(draw_ret), esp_err_to_name(drain_ret));
+    }
+    if (drain_ret == ESP_OK) { lv_disp_flush_ready(driver); }
+}
+
 // 液晶屏初始化
 esp_err_t bsp_display_new(void)
 {
@@ -493,7 +506,16 @@ static lv_disp_t *bsp_display_lcd_init(void)
         }
     };
 
-    return lvgl_port_add_disp(&disp_cfg);
+    lvgl_port_lock(0);
+    lv_disp_t *display = lvgl_port_add_disp(&disp_cfg);
+    if (display != NULL) {
+        const esp_lcd_panel_io_callbacks_t callbacks = {0};
+        ESP_ERROR_CHECK(esp_lcd_panel_io_tx_param(io_handle, -1, NULL, 0));
+        ESP_ERROR_CHECK(esp_lcd_panel_io_register_event_callbacks(io_handle, &callbacks, NULL));
+        display->driver->flush_cb = bsp_lcd_flush;
+    }
+    lvgl_port_unlock();
+    return display;
 }
 
 // 触摸屏初始化
