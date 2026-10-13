@@ -16,8 +16,10 @@
 - 本机存储：查看板载 Flash、固件/配置/NVS/运行内存，并挂载 3 MiB wear-level FAT 到 `/local`，用于小配置、日志和缓存；无需 TF 卡，不读取或显示密码。
 - BLE HID 组合控制器：广播为 `SZPI-HID`，支持媒体遥控、键盘方向/常用键、鼠标移动/点击和清除配对。
 - 姿态页面：QMI8658 读数失败时避免用坏数据刷新 UI。
+- 视频：TF 卡 MJPEG/PCM AVI 播放，支持声音、暂停、重播和全屏；已完成 Bad Apple 320x240/15 fps 整片实机验证。
+- IP 相机：HTTP/HTTPS JPEG 快照和 MJPEG 预览，屏幕配置/NVS 保存、TF 配置导入、暂停、重连与全屏；真实摄像头兼容性待验证。
 
-仍在探索的方向：BLE Audio 或外接经典蓝牙 A2DP/HFP 音频模块、USB 摄像头、小视频播放/录像、媒体缩略图和后台增量索引。
+仍在探索的方向：外接经典蓝牙音频模块、USB 摄像头、更多视频格式/录像、媒体缩略图和后台增量索引。ESP32-S3 原生不支持经典蓝牙音频或 LE Audio。
 
 ## 仓库结构
 
@@ -74,6 +76,7 @@ PHP API 默认 key 是 `change-me`，部署时复制 `backend/image-api/config.s
 - [Windows Environment](docs/windows-environment.md)
 - [Feature Notes](docs/features.md)
 - [视频播放与转码](docs/video.md)
+- [IP 相机预览与配置](docs/ip-camera.md)
 - [Serverless 多云后端与 Terraform 部署](backend/serverless-media/README.md)
 - [Roadmap](docs/roadmap.md)
 - [Release Build](docs/release.md)

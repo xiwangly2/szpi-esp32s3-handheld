@@ -1,0 +1,6 @@
+# Copy to /szpi/config/ip-camera.ini on the TF card.
+# Direct HTTP(S) JPEG snapshot or multipart/x-mixed-replace MJPEG URL.
+# Leave blank until a camera endpoint is available. Do not commit private URLs.
+url=
+max_fps=10
+snapshot_ms=500

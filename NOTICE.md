@@ -2,9 +2,11 @@
 
 This repository contains an ESP-IDF application and a small PHP image API helper.
 
-Third-party components are not vendored except for the local FatFs override used
-by the firmware. Dependencies downloaded by ESP-IDF Component Manager keep their
-own upstream licenses.
+Third-party components are not vendored except for the local FatFs override and
+the MIT-licensed multipart-parser 1.0.1 copy used by IP camera preview. Its source,
+license and small allocation-failure fix are documented under
+`firmware/handheld/components/multipart-parser/UPSTREAM.md`. Dependencies
+downloaded by ESP-IDF Component Manager keep their own upstream licenses.
 
 Video demuxing uses Espressif's `esp_extractor` prebuilt component. Its
 Espressif Modified MIT license permits use with Espressif products only and is

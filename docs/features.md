@@ -118,6 +118,10 @@ The recorder stores 16 kHz mono WAV files at:
 
 ## Camera
 
+The separate fourth-page `IP相机` viewer supports configurable HTTP(S) JPEG
+snapshots and multipart MJPEG. See [configuration, limits and verification
+status](ip-camera.md). It does not use the on-board camera and does not record.
+
 Camera initialization happens inside the camera task. Failures are shown on the
 LVGL page instead of aborting the whole firmware. Photos are saved to:
 
@@ -170,12 +174,12 @@ The clear-pairing action helps recover from stale host bonds.
 
 ESP32-S3 does not provide Bluetooth Classic A2DP/HFP audio in this firmware
 target. A complete Bluetooth speaker or microphone product should be treated as
-a future BLE Audio experiment where supported, or as an external Classic
-Bluetooth audio module connected by I2S or UART.
+an external Classic Bluetooth audio module connected by I2S or UART. ESP32-S3
+also lacks native LE Audio support; this is not a pending firmware feature.
 
 ## Roadmap
 
 Exploratory directions are intentionally tracked as future work until they are
-stable on real hardware: BLE Audio or external A2DP/HFP audio module support,
+stable on real hardware: external A2DP/HFP audio module support,
 USB plug-and-play camera, broader video codecs, camera recording, thumbnail
 generation, and incremental background indexing.

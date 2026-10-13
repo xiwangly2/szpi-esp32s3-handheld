@@ -7,6 +7,7 @@ Recommended layout:
 ```text
 /szpi/config/wifi.ini
 /szpi/config/wlan_history.ini
+/szpi/config/ip-camera.ini
 /szpi/cache/random/latest.jpg
 /szpi/cache/media_index.tsv
 /szpi/photos/
@@ -39,6 +40,9 @@ On Windows, the helper script can create the recommended directories and
 ```powershell
 .\tools\powershell\prepare-tf-card.ps1 -Drive E: -Ssid "YOUR_2G_SSID" -Password "YOUR_WIFI_PASSWORD" -ApiUrl "https://example.com/image.php?key=change-me&return=print&esp=1"
 ```
+
+For network camera URL configuration and NVS precedence, see
+[IP Camera Preview](ip-camera.md).
 
 ## WLAN History
 

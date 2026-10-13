@@ -61,3 +61,13 @@ menu "Handheld Video Player"
             HTTP(S) URL serving a converted MJPEG/PCM AVI file. A url= entry in
             /sdcard/szpi/config/video.ini overrides it. Keep personal URLs out of git.
 endmenu
+
+menu "Handheld IP Camera"
+    config HANDHELD_IP_CAMERA_URL
+        string "Default JPEG/MJPEG URL (optional)"
+        default ""
+        help
+            HTTP(S) JPEG snapshot or multipart MJPEG endpoint. On-device NVS
+            settings take priority over /szpi/config/ip-camera.ini and this
+            fallback. Keep private URLs and credentials out of public builds.
+endmenu
