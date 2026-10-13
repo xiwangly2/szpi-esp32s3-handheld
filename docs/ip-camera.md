@@ -77,3 +77,13 @@ camera endpoint was supplied for this implementation, so sustained streaming,
 TLS/auth interoperability, scaled-image rendering and reconnect behavior still
 need validation with an actual endpoint. Do not interpret host tests as those
 hardware results.
+
+### Device Checkpoint: 2026-10-13
+
+Firmware `b1f0378` built, flashed on COM6, booted, and was packaged. The user
+confirmed that the keyboard is fully on screen and that input, Save and Back
+work. Serial logs show connection-failure retries reaching the three-attempt
+limit without a restart. Native protocol tests and the existing video-clock
+test passed. A previous keyboard positioning issue was fixed by explicitly
+using top-left alignment instead of inheriting the keyboard's bottom alignment.
+Actual JPEG/MJPEG camera rendering and interoperability remain unverified.
