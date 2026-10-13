@@ -8,7 +8,7 @@
 #include "esp_crt_bundle.h"
 #include "esp_timer.h"
 #include "esp_wifi.h"
-#include "jpeg_decoder.h"
+#include "esp_jpeg_dec.h"
 #include <stdatomic.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -41,6 +41,7 @@ struct video_session {
     lv_img_dsc_t image_desc;
     lv_timer_t *timer;
     uint16_t *pixels, *display;
+    jpeg_dec_handle_t decoder;
     char path[512];
     char url[512];
     uint8_t *volume;
@@ -335,30 +336,35 @@ static const char *play_file(video_session_t *s)
                 continue;
             }
             phase_start = esp_timer_get_time();
-            esp_jpeg_image_cfg_t cfg = {
-                .indata = frame.frame_buffer, .indata_size = frame.frame_size,
-                .out_format = JPEG_IMAGE_FORMAT_RGB565, .out_scale = JPEG_IMAGE_SCALE_0,
-                .outbuf = (uint8_t *)s->pixels, .outbuf_size = VIDEO_PIXELS * 2,
-                .flags.swap_color_bytes = 1,
+            jpeg_dec_io_t io = {
+                .inbuf = frame.frame_buffer, .inbuf_len = (int)frame.frame_size,
+                .outbuf = (uint8_t *)s->pixels,
             };
-            esp_jpeg_image_output_t image_info = {0};
+            jpeg_dec_header_info_t image_info = {0};
+            int output_len = 0;
             decode_ok = frame.frame_buffer != NULL && frame.frame_size <= VIDEO_MAX_FRAME &&
-                        esp_jpeg_get_image_info(&cfg, &image_info) == ESP_OK &&
+                        jpeg_dec_parse_header(s->decoder, &io, &image_info) == JPEG_ERR_OK &&
                         image_info.width > 0 && image_info.width <= 320 && image_info.height > 0 &&
-                        image_info.height <= 240 && image_info.output_len <= VIDEO_PIXELS * 2;
-            if (decode_ok) { decode_ok = esp_jpeg_decode(&cfg, &image_info) == ESP_OK; }
+                        image_info.height <= 240 &&
+                        jpeg_dec_get_outbuf_len(s->decoder, &output_len) == JPEG_ERR_OK &&
+                        output_len > 0 && output_len <= VIDEO_PIXELS * 2;
+            if (decode_ok) { decode_ok = jpeg_dec_process(s->decoder, &io) == JPEG_ERR_OK; }
             decode_us += esp_timer_get_time() - phase_start;
             decode_count++;
             if (decode_ok && wait_for_pts(s, (int64_t)frame.pts * 1000)) {
                 phase_start = esp_timer_get_time();
                 lvgl_port_lock(0);
                 if (s->image != NULL && !interrupted(s)) {
-                        memcpy(s->display, s->pixels, image_info.output_len);
+                        // LVGL has finished reading the old frame while this lock is held.
+                        uint16_t *previous = s->display;
+                        s->display = s->pixels;
+                        s->pixels = previous;
+                        lv_img_cache_invalidate_src(&s->image_desc);
                         s->image_desc.header.cf = LV_IMG_CF_TRUE_COLOR;
                         s->image_desc.header.w = image_info.width;
                         s->image_desc.header.h = image_info.height;
                         s->image_desc.data = (uint8_t *)s->display;
-                        s->image_desc.data_size = image_info.output_len;
+                        s->image_desc.data_size = image_info.width * image_info.height * 2;
                         lv_img_set_src(s->image, &s->image_desc);
                         lv_obj_center(s->image);
                         lv_obj_invalidate(s->image);
@@ -500,9 +506,12 @@ static void video_task(void *arg)
 {
     video_session_t *s = arg;
     bool registered = esp_avi_extractor_register() == ESP_EXTRACTOR_ERR_OK;
-    s->pixels = heap_caps_malloc(VIDEO_PIXELS * 2, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
-    s->display = heap_caps_calloc(VIDEO_PIXELS, 2, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
-    bool ready = registered && s->pixels != NULL && s->display != NULL;
+    s->pixels = heap_caps_aligned_alloc(16, VIDEO_PIXELS * 2, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    s->display = heap_caps_aligned_alloc(16, VIDEO_PIXELS * 2, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    jpeg_dec_config_t decoder_config = DEFAULT_JPEG_DEC_CONFIG();
+    decoder_config.output_type = JPEG_PIXEL_FORMAT_RGB565_BE;
+    bool decoder_ready = jpeg_dec_open(&decoder_config, &s->decoder) == JPEG_ERR_OK;
+    bool ready = registered && decoder_ready && s->pixels != NULL && s->display != NULL;
     if (!ready) { set_status(s, "视频内存不足"); }
     while (!atomic_load(&s->closing)) {
         int command = atomic_exchange(&s->command, COMMAND_NONE);
@@ -531,6 +540,7 @@ static void video_task(void *arg)
         }
     }
     if (registered) { esp_avi_extractor_unregister(); }
+    if (s->decoder != NULL) { jpeg_dec_close(s->decoder); }
     pa_en(0);
     bsp_codec_mute_set(true);
     bsp_codec_set_fs(CODEC_DEFAULT_SAMPLE_RATE, 16, CODEC_DEFAULT_CHANNEL);

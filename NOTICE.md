@@ -11,6 +11,10 @@ Espressif Modified MIT license permits use with Espressif products only and is
 not the same license as this application's source. The component's full notice
 is included at `docs/licenses/esp-extractor.txt` and in its downloaded directory.
 
+Video JPEG decoding uses `espressif/esp_new_jpeg` 1.0.2, a prebuilt component
+optimized for Espressif chips. Its ESPRESSIF MIT license is likewise limited to
+Espressif products. The full notice is included at `docs/licenses/esp-new-jpeg.txt`.
+
 The firmware enables optional exFAT support in FatFs. Check the FatFs/exFAT
 license terms for your own commercial distribution plan before shipping a
 product.

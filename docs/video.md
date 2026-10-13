@@ -78,10 +78,22 @@ bundle. Device-side downloading still requires a writable TF card.
   than accumulating unlimited memory. Extractor indexing is disabled.
 - Closing/restarting waits for the old audio task before reusing the codec or
   freeing the preview. Large pixel/frame pools use PSRAM.
+- Video uses the S3-optimized `esp_new_jpeg` decoder with a reusable handle
+  and two 16-byte-aligned PSRAM RGB565 buffers. The buffers swap under the LVGL
+  lock rather than copying the entire picture for every frame. The separate
+  still-image preview decoder is unchanged.
+- The board's external amplifier is controlled through PCA9557, separately
+  from codec mute. Video enables it only during unmuted audio playback and
+  disables it on pause, stop, errors, and exit.
 
 `tests/video` checks clock behavior and the PHP API. FFprobe validates converted
 media. Serial progress reports shown/dropped frames; only an actual full-length
 device run can establish smoothness, audible sound, sync, and gesture behavior.
+
+The `timing avg us` log splits frame extraction, JPEG decoding, and LVGL
+submission (including lock wait). `PCM output` reports source bytes and peak
+sample magnitude without dumping audio. Speaker diagnostics include the
+amplifier enable bit as well as codec mute/volume.
 
 The demuxer is Espressif's `esp_extractor` binary component. Its license is
 separate from this repository's application code; see `NOTICE.md`. On IDF 5.4,
