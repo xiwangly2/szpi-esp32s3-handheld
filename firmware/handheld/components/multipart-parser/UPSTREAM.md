@@ -5,4 +5,5 @@ https://components.espressif.com/components/zorxx/multipart-parser/versions/1.0.
 https://github.com/zorxx/multipart-parser
 
 Local change: reject null arguments and allocation failure in parser creation.
+Trailing whitespace is normalized; parsing behavior is otherwise unchanged.
 The upstream MIT license is retained in LICENSE and the source headers.

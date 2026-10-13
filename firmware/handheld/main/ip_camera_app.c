@@ -468,6 +468,7 @@ static void settings_cb(lv_event_t *event)
     lv_textarea_set_one_line(s->address, true); lv_textarea_set_max_length(s->address, IPCAM_URL_SIZE - 1);
     lv_textarea_set_placeholder_text(s->address, "http://"); lv_textarea_set_text(s->address, s->config.url);
     lv_obj_t *keyboard = lv_keyboard_create(s->editor);
+    lv_obj_set_align(keyboard, LV_ALIGN_TOP_LEFT);
     lv_obj_set_pos(keyboard, 0, 96); lv_obj_set_size(keyboard, 320, 144);
     lv_obj_set_style_text_font(keyboard, &lv_font_montserrat_14, LV_PART_ITEMS);
     lv_keyboard_set_textarea(keyboard, s->address);
