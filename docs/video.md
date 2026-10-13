@@ -109,7 +109,13 @@ amplifier enable bit as well as codec mute/volume.
   for the LVGL mutex. This revision did **not** pass the full-length gate.
 - The display adapter now drains queued SPI transfers before returning the
   draw buffer from the LVGL task. It does not pretend DMA has completed on a
-  timer. Repeat full-length and cross-app checks after this change.
+  timer. With this fix, `4da8ce4` completed the 219.067-second, 320x240/15-fps
+  BadApple AVI: `shown=3286 dropped=0 elapsed_ms=219415`, matching FFprobe's
+  3286 frames. The audio worker ended with `error=0` and 9661440 source PCM
+  bytes sent. The user confirmed complete playback, full-screen switching,
+  and Back; subsequent short reopen/Back runs also ended without audio errors.
+  Typical decode/submission times remained about 10 ms / 0.5 ms. This is a
+  one-board, one-card, one-file check, not qualification of every AVI or card.
 - Default OpenOCD GDB attachment can reset this protected target while probing
   flash. Such debug-induced resets are not playback crash evidence. For a
   non-flashing attachment, set `ESP_FLASH_SIZE` to `0` before loading the board
