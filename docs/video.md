@@ -95,6 +95,21 @@ submission (including lock wait). `PCM output` reports source bytes and peak
 sample magnitude without dumping audio. Speaker diagnostics include the
 amplifier enable bit as well as codec mute/volume.
 
+### Board Checkpoint: 2026-10-13
+
+- `9057095`: the user confirmed audible video, pause/resume, and mute. The
+  silence was caused by the missing PCA9557 amplifier enable, not an empty
+  PCM track or codec mute. A trial changing codec initialization order did
+  not fix it and was reverted. The video timing logs measured about 53-55 ms
+  decoding, 4.5-5.4 ms extraction, and 5.7 ms submission per processed frame.
+- `d013440`: SIMD decoder and aligned buffer swapping build, flash, boot,
+  and release packaging passed on the connected ESP32-S3. Playback timing,
+  visible rendering, sound, full-length playback, and rapid exit/reopen still
+  need device validation for this revision; no faster frame rate is claimed
+  from the upstream decoder benchmark alone.
+- The clock host test and Git LFS integrity check passed. Existing TF media
+  can be reused; the optimized decoder does not require another conversion.
+
 The demuxer is Espressif's `esp_extractor` binary component. Its license is
 separate from this repository's application code; see `NOTICE.md`. On IDF 5.4,
 `extractor_log_compat.c` forwards its preformatted V1 log calls to the legacy
