@@ -1481,13 +1481,11 @@ esp_err_t bsp_codec_set_fs(uint32_t rate, uint32_t bits_cfg, i2s_slot_mode_t ch)
         ret |= esp_codec_dev_set_in_gain(record_dev_handle, CODEC_DEFAULT_ADC_VOLUME);
     }
 
-    // IDF 5.4 rebinds MCLK on each channel reconfiguration. Configure the
-    // full-duplex TX master last so the DAC's MCLK follows its BCLK/WS.
-    if (record_dev_handle) {
-        ret |= esp_codec_dev_open(record_dev_handle, &fs);
-    }
     if (play_dev_handle) {
         ret |= esp_codec_dev_open(play_dev_handle, &fs);
+    }
+    if (record_dev_handle) {
+        ret |= esp_codec_dev_open(record_dev_handle, &fs);
     }
     return ret;
 }
@@ -1557,6 +1555,9 @@ void bsp_codec_log_playback_state(void)
     int vol_ret = esp_codec_dev_get_out_vol(play_dev_handle, &volume);
     int mute_ret = esp_codec_dev_get_out_mute(play_dev_handle, &muted);
     ESP_LOGI(TAG, "speaker state: volume=%d mute=%d read_status=%d/%d", volume, muted, vol_ret, mute_ret);
+    uint8_t output = 0;
+    int pa_ret = pca9557_register_read(PCA9557_OUTPUT_PORT, &output, 1);
+    ESP_LOGI(TAG, "speaker amplifier: enabled=%d read_status=%d", !!(output & PA_EN_GPIO), pa_ret);
     const uint8_t regs[] = {0x00, 0x01, 0x02, 0x05, 0x09, 0x0d, 0x0e, 0x12, 0x31, 0x32, 0x37};
     for (size_t i = 0; i < sizeof(regs); i++) {
         int value = 0;

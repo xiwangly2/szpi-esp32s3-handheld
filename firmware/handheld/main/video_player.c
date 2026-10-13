@@ -48,7 +48,7 @@ struct video_session {
     atomic_bool closing, audio_done, audio_error, stop_media;
     atomic_int command;
     video_clock_t clock;
-    bool playing, fullscreen, muted;
+    bool playing, fullscreen, muted, has_audio;
     bool select_default;
     uint32_t duration;
     uint32_t shown, dropped;
@@ -62,6 +62,15 @@ static bool interrupted(video_session_t *s)
 {
     return atomic_load(&s->closing) || atomic_load(&s->stop_media) ||
            atomic_load(&s->command) != COMMAND_NONE;
+}
+
+// Called with the LVGL lock held, like the playback controls it reflects.
+static void update_audio_output(video_session_t *s)
+{
+    bool enabled = s->playing && s->has_audio && !s->muted && !s->clock.paused && !interrupted(s);
+    if (!enabled) { pa_en(0); }
+    bsp_codec_mute_set(!enabled);
+    if (enabled) { pa_en(1); }
 }
 
 static void set_status(video_session_t *s, const char *message)
@@ -282,10 +291,11 @@ static const char *play_file(video_session_t *s)
     if (s->progress != NULL) { lv_bar_set_range(s->progress, 0, (int32_t)s->duration); }
     s->shown = 0; s->dropped = 0;
     s->clock = (video_clock_t){ .start_us = esp_timer_get_time() };
+    s->has_audio = audio_count > 0;
     s->playing = true;
     if (s->play_label != NULL) { lv_label_set_text(s->play_label, LV_SYMBOL_PAUSE); }
     bsp_codec_volume_set(*s->volume, NULL);
-    bsp_codec_mute_set(s->muted);
+    update_audio_output(s);
     ESP_LOGI(TAG, "audio setup: rate=%lu source_channels=%u volume=%u muted=%d",
              (unsigned long)s->audio_info.sample_rate, s->audio_info.channel, *s->volume, s->muted);
     lvgl_port_unlock();
@@ -302,9 +312,14 @@ static const char *play_file(video_session_t *s)
     ESP_LOGI(TAG, "play: %ux%u %ufps duration=%lu audio=%u", info.video_info.width, info.video_info.height,
              info.video_info.fps, (unsigned long)info.duration, audio_count);
     int64_t next_report = esp_timer_get_time() + 5000000;
+    int64_t read_us = 0, decode_us = 0, submit_us = 0;
+    uint32_t read_count = 0, decode_count = 0;
     while (!interrupted(s)) {
         esp_extractor_frame_info_t frame = {0};
+        int64_t phase_start = esp_timer_get_time();
         esp_extractor_err_t ret = esp_extractor_read_frame(video.extractor, &frame);
+        read_us += esp_timer_get_time() - phase_start;
+        read_count++;
         if (ret == ESP_EXTRACTOR_ERR_EOS) { break; }
         if (ret != ESP_EXTRACTOR_ERR_OK) { result = "视频读取失败"; break; }
         bool eos = EXTRACTOR_IS_EOS(frame.frame_flag);
@@ -319,6 +334,7 @@ static const char *play_file(video_session_t *s)
                 if (eos) { break; }
                 continue;
             }
+            phase_start = esp_timer_get_time();
             esp_jpeg_image_cfg_t cfg = {
                 .indata = frame.frame_buffer, .indata_size = frame.frame_size,
                 .out_format = JPEG_IMAGE_FORMAT_RGB565, .out_scale = JPEG_IMAGE_SCALE_0,
@@ -331,7 +347,10 @@ static const char *play_file(video_session_t *s)
                         image_info.width > 0 && image_info.width <= 320 && image_info.height > 0 &&
                         image_info.height <= 240 && image_info.output_len <= VIDEO_PIXELS * 2;
             if (decode_ok) { decode_ok = esp_jpeg_decode(&cfg, &image_info) == ESP_OK; }
+            decode_us += esp_timer_get_time() - phase_start;
+            decode_count++;
             if (decode_ok && wait_for_pts(s, (int64_t)frame.pts * 1000)) {
+                phase_start = esp_timer_get_time();
                 lvgl_port_lock(0);
                 if (s->image != NULL && !interrupted(s)) {
                         memcpy(s->display, s->pixels, image_info.output_len);
@@ -346,6 +365,7 @@ static const char *play_file(video_session_t *s)
                         s->shown++;
                 }
                 lvgl_port_unlock();
+                submit_us += esp_timer_get_time() - phase_start;
             }
         }
         esp_extractor_release_frame(video.extractor, &frame);
@@ -355,6 +375,10 @@ static const char *play_file(video_session_t *s)
         if (esp_timer_get_time() >= next_report) {
             ESP_LOGI(TAG, "progress: pts=%lu shown=%lu dropped=%lu", (unsigned long)frame.pts,
                      (unsigned long)s->shown, (unsigned long)s->dropped);
+            ESP_LOGI(TAG, "timing avg us: read=%lld decode=%lld submit=%lld", read_us / (read_count ? read_count : 1),
+                     decode_us / (decode_count ? decode_count : 1), submit_us / (decode_count ? decode_count : 1));
+            read_us = decode_us = submit_us = 0;
+            read_count = decode_count = 0;
             next_report = esp_timer_get_time() + 5000000;
         }
         vTaskDelay(1);
@@ -363,9 +387,9 @@ done:
     if (strcmp(result, "播放结束") != 0 || interrupted(s)) { atomic_store(&s->stop_media, true); }
     while (audio_started && !atomic_load(&s->audio_done)) { vTaskDelay(pdMS_TO_TICKS(10)); }
     source_close(&video);
-    bsp_codec_mute_set(true);
     lvgl_port_lock(0);
     s->playing = false;
+    update_audio_output(s);
     if (s->play_label != NULL) { lv_label_set_text(s->play_label, LV_SYMBOL_PLAY); }
     ESP_LOGI(TAG, "stopped: shown=%lu dropped=%lu elapsed_ms=%lld stack_free=%u", (unsigned long)s->shown,
              (unsigned long)s->dropped, video_clock_elapsed(&s->clock, esp_timer_get_time()) / 1000,
@@ -507,6 +531,7 @@ static void video_task(void *arg)
         }
     }
     if (registered) { esp_avi_extractor_unregister(); }
+    pa_en(0);
     bsp_codec_mute_set(true);
     bsp_codec_set_fs(CODEC_DEFAULT_SAMPLE_RATE, 16, CODEC_DEFAULT_CHANNEL);
     lvgl_port_lock(0);
@@ -525,6 +550,7 @@ static void close_cb(lv_event_t *e)
 {
     video_session_t *s = lv_event_get_user_data(e);
     atomic_store(&s->closing, true);
+    update_audio_output(s);
     if (s->status != NULL) { lv_label_set_text(s->status, "关闭中..."); }
 }
 
@@ -551,7 +577,7 @@ static void pause_cb(lv_event_t *e)
     video_session_t *s = lv_event_get_user_data(e);
     if (!s->playing) { atomic_store(&s->command, COMMAND_PLAY); return; }
     video_clock_pause(&s->clock, !s->clock.paused, esp_timer_get_time());
-    bsp_codec_mute_set(s->muted || s->clock.paused);
+    update_audio_output(s);
     lv_label_set_text(s->play_label, s->clock.paused ? LV_SYMBOL_PLAY : LV_SYMBOL_PAUSE);
 }
 
@@ -562,7 +588,7 @@ static void mute_cb(lv_event_t *e)
 {
     video_session_t *s = lv_event_get_user_data(e);
     s->muted = !s->muted;
-    bsp_codec_mute_set(s->muted || s->clock.paused || !s->playing);
+    update_audio_output(s);
     lv_label_set_text(s->mute_label, s->muted ? LV_SYMBOL_MUTE : LV_SYMBOL_VOLUME_MAX);
 }
 
