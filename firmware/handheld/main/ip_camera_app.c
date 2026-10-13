@@ -7,7 +7,6 @@
 #include "esp_jpeg_dec.h"
 #include "esp_timer.h"
 #include "esp_wifi.h"
-#include "jpeg_decoder.h"
 #include "nvs.h"
 #include <stdatomic.h>
 #include <stdio.h>
@@ -31,7 +30,7 @@ typedef struct {
     lv_img_dsc_t descriptor;
     uint16_t *pixels, *display;
     uint8_t *frame, *read_buffer;
-    jpeg_dec_handle_t decoder;
+    jpeg_dec_handle_t decoder, probe;
     uint16_t output_width, output_height;
     bool scaled, fullscreen, loaded;
     unsigned edit_max_fps, edit_snapshot_ms;
@@ -148,13 +147,18 @@ static bool receive_frame(void *context, const uint8_t *data, size_t size)
     s->received++;
     s->last_frame_us = esp_timer_get_time();
     if (s->last_render_us && s->last_frame_us - s->last_render_us < 1000000 / s->max_fps) return true;
-    esp_jpeg_image_cfg_t probe = { .indata = (uint8_t *)data, .indata_size = size,
-                                 .out_format = JPEG_IMAGE_FORMAT_RGB565 };
-    esp_jpeg_image_output_t original = {0};
+    jpeg_dec_header_info_t original = {0};
     uint16_t width = 0, height = 0;
     s->frame_error = "JPEG格式或尺寸不支持";
-    if (size < 4 || size > IPCAM_FRAME_LIMIT ||
-        esp_jpeg_get_image_info(&probe, &original) != ESP_OK ||
+    if (size < 4 || size > IPCAM_FRAME_LIMIT) return false;
+    if (!s->probe) {
+        jpeg_dec_config_t config = DEFAULT_JPEG_DEC_CONFIG();
+        config.output_type = JPEG_PIXEL_FORMAT_RGB565_BE;
+        if (jpeg_dec_open(&config, &s->probe) != JPEG_ERR_OK) { s->frame_error = "解码内存不足"; return false; }
+    }
+    // Probe without scaling so source limits cannot be hidden by output scaling.
+    jpeg_dec_io_t probe_io = { .inbuf = (uint8_t *)data, .inbuf_len = (int)size };
+    if (jpeg_dec_parse_header(s->probe, &probe_io, &original) != JPEG_ERR_OK ||
         !ipcam_fit(original.width, original.height, &width, &height)) return false;
     bool scaled = original.width != width || original.height != height;
     if (scaled && ((original.width & 7) || (original.height & 7))) return false;
@@ -337,6 +341,7 @@ static void worker(void *argument)
         lvgl_port_lock(0); update_play(s); lvgl_port_unlock();
     }
     if (s->decoder) jpeg_dec_close(s->decoder);
+    if (s->probe) jpeg_dec_close(s->probe);
     lvgl_port_lock(0);
     if (s->page) lv_obj_del(s->page);
     lv_img_cache_invalidate_src(&s->descriptor);
