@@ -70,3 +70,21 @@ Keep the entire symbol in view and vary the distance slowly. The board camera's
 fixed focus and lighting can affect recognition even when host decoder tests pass.
 
 See [the regression checks](../tests/wifi-qr/README.md) for host and device tests.
+
+## Device Verification
+
+On 2026-10-14 (Asia/Shanghai), firmware `ccca57f` was built and flashed to the
+connected SZPI ESP32-S3. The user confirmed normal preview colors and no reboot
+after repeated scanner/photo-page entry and return. This is the accepted
+replacement for the failed direct-PSRAM-DMA experiment `e130869`.
+
+- Host checks: Wi-Fi payload and decoder 2/2, video clock 1/1, IP camera
+  protocol 1/1 passed. Flash verification and automatic WLAN reconnection passed.
+- The interactive result is user-observed, not a complete captured serial
+  trace. A subsequent no-reset serial snapshot showed about 55 KiB free
+  internal heap, a 31 KiB largest internal block, and about 7.9 MiB free PSRAM.
+- This round does not establish long-duration soak reliability, saved-photo
+  file integrity, or fresh optical scan-to-connect/persistence coverage.
+
+Local merged artifact: `release/szpi-esp32s3-handheld-ccca57f-camera-bounce.bin`.
+SHA-256: `A81B195DAB78567CD3103D612E964F186B458ED881DADBB6DFC260BDA06C7684`.
