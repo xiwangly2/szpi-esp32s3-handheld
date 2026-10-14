@@ -3223,13 +3223,14 @@ static void task_process_camera(void *arg)
             camera_save_frame(frame);
         }
 
+        // LVGL reads this same buffer while rendering; publish a complete frame.
+        lvgl_port_lock(0);
         size_t copy_len = frame->len < frame_bytes ? frame->len : frame_bytes;
         memcpy(s_camera_display_buf, frame->buf, copy_len);
         if (copy_len < frame_bytes) {
             memset(s_camera_display_buf + copy_len, 0, frame_bytes - copy_len);
         }
         img_camera_dsc.data = s_camera_display_buf;
-        lvgl_port_lock(0);
         if (img_camera != NULL) {
             lv_img_set_src(img_camera, &img_camera_dsc);
         }

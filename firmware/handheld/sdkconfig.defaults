@@ -52,9 +52,11 @@ CONFIG_MBEDTLS_DYNAMIC_FREE_CA_CERT=y
 CONFIG_SCCB_HARDWARE_I2C_DRIVER_NEW=y
 CONFIG_SCCB_HARDWARE_I2C_PORT0=y
 # CONFIG_SCCB_HARDWARE_I2C_PORT1 is not set
-# Capture into PSRAM; a 30 KiB internal DMA bounce buffer cannot reliably fit
-# beside WLAN, LVGL and the QR worker's internal stack.
-CONFIG_CAMERA_PSRAM_DMA=y
+# Keep frames in PSRAM, but use a small internal DMA bounce buffer. Direct
+# PSRAM DMA showed corrupt RGB frames and heap assertions on camera teardown.
+# QVGA RGB565 uses 7680 bytes with this limit, instead of 30720 bytes.
+CONFIG_CAMERA_DMA_BUFFER_SIZE_MAX=8192
+# CONFIG_CAMERA_PSRAM_DMA is not set
 CONFIG_LWIP_TCP_OOSEQ_MAX_PBUFS=4
 CONFIG_OPENTHREAD_RX_ON_WHEN_IDLE=y
 CONFIG_SPIFFS_OBJ_NAME_LEN=128

@@ -26,7 +26,10 @@ or persistence. On the actual board:
 
 1. Enter WLAN and open the scanner. Check the camera preview and Back. Repeat
    rapidly, then switch to the photo app and back; neither app may restart or
-   lose the camera.
+   lose the camera. Check moving subjects for color trails/tearing, and take a
+   photo. Confirm `psram_dma=0`, `buffer_size: 7680`, and a 153600-byte frame
+   buffer in PSRAM in the serial log. Check that internal free/largest-block
+   values recover after repeated exits with WLAN still connected.
 2. Scan an authorized WPA/WPA2 Wi-Fi sharing code. Check the decoded SSID on
    the connection page and DHCP success in serial logs. No password or raw QR
    payload may appear in those logs.

@@ -41,14 +41,23 @@ code, and payload buffers use PSRAM; quirc's larger allocations also use the
 project's PSRAM-enabled allocator. The worker has a 16 KiB stack because quirc's
 decode function contains an 8896-byte local work buffer.
 
-The GC0308 RGB565 capture path uses one frame buffer in PSRAM and enables
-`CONFIG_CAMERA_PSRAM_DMA=y`. This avoids the driver's approximately 30 KiB
-contiguous internal DMA bounce-buffer request, which can fail after WLAN and
-the QR worker allocate their internal stacks even when several MiB of PSRAM
-remain free. This applies to the photo app's shared camera initialization too.
-When reusing an old `sdkconfig`, enable Camera configuration > PSRAM DMA;
-changing `sdkconfig.defaults` alone does not replace an existing saved value.
-The camera-start log reports the effective mode and largest DMA-capable block.
+The GC0308 RGB565 capture path uses one 153600-byte frame buffer in PSRAM, with
+`CONFIG_CAMERA_PSRAM_DMA` disabled and `CONFIG_CAMERA_DMA_BUFFER_SIZE_MAX=8192`.
+At 320x240 the pinned driver uses a 7680-byte internal DMA bounce buffer. Its
+default 30720-byte request failed after WLAN and the QR worker allocated their
+internal stacks, even with several MiB of free PSRAM. This smaller bounce
+buffer also applies to the photo app's shared camera initialization. It costs
+more DMA interrupts; check preview stability while WLAN is connected.
+
+Direct PSRAM DMA was tested in `e130869` but is not qualified for this board
+configuration: it produced abnormal color/ghosting and heap assertions at
+`cam_deinit()` when leaving both scanner and photo views. Keep it disabled;
+do not distribute that experimental binary as a stable camera release.
+
+When reusing an old `sdkconfig`, set Camera configuration > DMA buffer size to
+8192 and turn off PSRAM DMA. Changing `sdkconfig.defaults` alone does not
+replace existing saved values. The camera-start log reports the effective
+mode and largest DMA-capable block; `cam_hal` reports the actual buffer size.
 
 Scanning stops after 60 seconds or on Back. The camera and decoder are released
 before handing credentials to WLAN. Deleting the parent page cancels the scan;

@@ -149,8 +149,11 @@ They are not alternatives. Allocation policy for this board:
 - LCD display keeps small internal DMA draw buffers. Large images live in
   PSRAM and LVGL renders them into those buffers. Buffers are only reused after
   the SPI transfer finishes.
-- Camera capture uses its driver's PSRAM DMA mode and one RGB565 frame buffer.
-  Do not assume this mode is available on every peripheral or every chip.
+- Camera capture keeps one RGB565 frame in PSRAM, using a 7680-byte internal
+  DMA bounce buffer (`CONFIG_CAMERA_DMA_BUFFER_SIZE_MAX=8192`). Direct PSRAM
+  DMA is disabled: the pinned driver/board combination showed corrupt frames
+  and heap assertions during camera teardown. Generic hardware support is not
+  sufficient qualification for a particular buffer/cache configuration.
 - Audio sample queues can use PSRAM, but I2S hardware DMA buffers remain owned
   by the I2S driver. The same principle applies to future USB drivers: use their
   transfer-buffer allocation APIs and lifetime rules.
