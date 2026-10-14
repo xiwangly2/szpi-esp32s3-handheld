@@ -41,6 +41,15 @@ code, and payload buffers use PSRAM; quirc's larger allocations also use the
 project's PSRAM-enabled allocator. The worker has a 16 KiB stack because quirc's
 decode function contains an 8896-byte local work buffer.
 
+The GC0308 RGB565 capture path uses one frame buffer in PSRAM and enables
+`CONFIG_CAMERA_PSRAM_DMA=y`. This avoids the driver's approximately 30 KiB
+contiguous internal DMA bounce-buffer request, which can fail after WLAN and
+the QR worker allocate their internal stacks even when several MiB of PSRAM
+remain free. This applies to the photo app's shared camera initialization too.
+When reusing an old `sdkconfig`, enable Camera configuration > PSRAM DMA;
+changing `sdkconfig.defaults` alone does not replace an existing saved value.
+The camera-start log reports the effective mode and largest DMA-capable block.
+
 Scanning stops after 60 seconds or on Back. The camera and decoder are released
 before handing credentials to WLAN. Deleting the parent page cancels the scan;
 generation checks prevent an old result from connecting through a newer WLAN

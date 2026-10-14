@@ -673,11 +673,18 @@ esp_err_t bsp_camera_init(void)
     config.pixel_format = PIXFORMAT_RGB565;
     config.frame_size = FRAMESIZE_QVGA;
     config.jpeg_quality = 12;
-    config.fb_count = 2;
+    // RGB565 capture is consumed before its buffer is returned; avoid a
+    // continuous second capture competing with preview/QR reads from PSRAM.
+    config.fb_count = 1;
     config.fb_location = CAMERA_FB_IN_PSRAM;
     config.grab_mode = CAMERA_GRAB_WHEN_EMPTY;
     
     ESP_LOGI(TAG, "Camera config: sccb_i2c_port=%d, pin_sccb_sda=%d, pin_sccb_scl=%d", config.sccb_i2c_port, config.pin_sccb_sda, config.pin_sccb_scl);
+    ESP_LOGI(TAG, "Camera memory: psram_dma=%d dma_free=%u dma_largest=%u psram_largest=%u",
+             esp_camera_get_psram_mode(),
+             (unsigned)heap_caps_get_free_size(MALLOC_CAP_DMA),
+             (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_DMA),
+             (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_SPIRAM));
 
     // camera init
     esp_err_t err = esp_camera_init(&config); // 配置上面定义的参数

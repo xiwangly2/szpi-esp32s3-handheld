@@ -136,6 +136,35 @@ Open networks connect without a password prompt. Successful network credentials
 are persisted to device NVS and, when a TF card is present, to TF card history.
 The currently connected network is also synced to the random image app config.
 
+## Working Memory And DMA
+
+PSRAM is external working memory; DMA is a peripheral data-transfer mechanism.
+They are not alternatives. Allocation policy for this board:
+
+- Compressed media, decoded RGB565 images, preview buffers, large indexes and
+  network payload staging belong in PSRAM. SIMD image buffers are aligned as
+  required by their decoder.
+- Task stacks, interrupt-sensitive state and hardware descriptors stay in
+  internal memory unless a specific driver/API explicitly supports otherwise.
+- LCD display keeps small internal DMA draw buffers. Large images live in
+  PSRAM and LVGL renders them into those buffers. Buffers are only reused after
+  the SPI transfer finishes.
+- Camera capture uses its driver's PSRAM DMA mode and one RGB565 frame buffer.
+  Do not assume this mode is available on every peripheral or every chip.
+- Audio sample queues can use PSRAM, but I2S hardware DMA buffers remain owned
+  by the I2S driver. The same principle applies to future USB drivers: use their
+  transfer-buffer allocation APIs and lifetime rules.
+- Large fonts/assets belong in Flash or TF files rather than consuming RAM
+  wholesale. Storage capacity is not working memory capacity.
+
+Monitor free **internal** heap and its largest block, not just total free RAM.
+PSRAM capacity cannot satisfy an internal-only contiguous allocation. Consult
+the [pinned IDF heap capability documentation](https://docs.espressif.com/projects/esp-idf/en/v5.4.4/esp32s3/api-reference/system/mem_alloc.html)
+and each peripheral driver before choosing allocation flags. Direct PSRAM DMA
+also requires correct alignment/cache handling and exclusive buffer ownership
+until completion; avoid adding arbitrary cache operations around driver-owned
+buffers.
+
 ## Device Storage
 
 The third launcher page includes `本机存储`. It works without a TF card and
