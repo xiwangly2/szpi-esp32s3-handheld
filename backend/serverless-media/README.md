@@ -1,4 +1,4 @@
-# Portable Serverless Video API
+# Portable Serverless Media And Information API
 
 One HTTP contract, with adapters for AWS S3, Cloudflare R2, Tencent COS, and
 Alibaba OSS. Functions authenticate requests and sign direct object-storage
@@ -29,21 +29,31 @@ cd backend/serverless-media
 npm ci
 npm test
 npm run build
-npm run deploy:aws
+npm run deploy:aws -- --plan-only
+npm run deploy:aws -- --apply
 npm run upload -- ..\..\release\video\BadApple.avi
 ```
 
 Set `AWS_REGION` to change the default `ap-east-1` region before initial deploy.
-The script uses `terraform init`, `validate`, saved `plan`, and `apply`; a repeat
-run is idempotent. Use `node tools/deploy-aws.mjs --plan-only` to review first.
-Set `TERRAFORM_BIN=tofu` to use OpenTofu with the same configuration; OpenTofu
-execution has not been tested in this checkout.
+The script defaults to `init`, `validate` and saved `plan`; `--apply` is required
+to modify resources. Deletion/replacement plans are refused. Run it from any
+working directory; project paths are resolved from the script location.
+Use `--engine=tofu` or `TERRAFORM_BIN` to select OpenTofu explicitly. OpenTofu
+1.13.1 init/validate passed for all four templates in an isolated directory;
+production state migration and non-AWS deployment are not qualified. Its
+registry may rewrite provider lock entries or select different provider versions.
+Back up state and review the [OpenTofu migration guide](https://opentofu.org/docs/intro/migration/migration-guide/)
+before switching engines on an existing deployment. Do not alternate engines
+casually or initialize against an empty state for existing resources.
 
 Outputs are saved to `.deploy/aws.json`. Independent random admin/read tokens
 are generated once and retained in `.deploy/aws-secrets.json`. The ready-to-use
 device config is `.deploy/video.ini`; put it at `/szpi/config/video.ini` on TF.
 Then use `网络` in the handheld video player. The stable API URL issues a new
 short-lived download URL each time, so the TF config itself does not expire.
+The script also generates `.deploy/info.ini` for `/szpi/config/info.ini`.
+Edit `.deploy/info.json` to customize information sources; otherwise the labeled
+Shenzhen example in `info.example.json` is used. See [Information Desk](../../docs/information-desk.md).
 
 Terraform creates a dedicated bucket, scoped IAM role, Lambda, HTTP API with
 5 requests/second throttling, and seven-day function logs. Bucket deletion is
@@ -53,6 +63,8 @@ silently erase videos. Cloud usage is billed to the selected account.
 ## Common API
 
 - `GET /health`: public status; no credentials or bucket information.
+- `GET /info`: authenticated compact weather/RSS/provider-status JSON. The
+  device uses a read-only Bearer token. Responses are bounded to 16 KiB.
 - `GET /media/BadApple.avi`: read/admin Bearer token, or `?key=READ_TOKEN` for
   the ESP client. Returns HTTP 307 to an expiring signed object URL.
 - `HEAD /media/BadApple.avi`: authenticated metadata, including Content-Length.

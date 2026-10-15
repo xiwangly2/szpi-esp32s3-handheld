@@ -45,6 +45,7 @@ resource "cloudflare_workers_script" "media" {
     { name = "R2_ACCOUNT_ID", type = "plain_text", text = var.account_id },
     { name = "READ_TOKEN", type = "secret_text", text = var.read_token },
     { name = "ADMIN_TOKEN", type = "secret_text", text = var.admin_token },
+    { name = "INFO_CONFIG_JSON", type = "plain_text", text = var.information_config },
     { name = "R2_ACCESS_KEY_ID", type = "secret_text", text = var.r2_access_key_id },
     { name = "R2_SECRET_ACCESS_KEY", type = "secret_text", text = var.r2_secret_access_key }
   ]

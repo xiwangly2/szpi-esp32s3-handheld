@@ -59,6 +59,7 @@ resource "tencentcloud_scf_function" "media" {
     STORAGE_SECRET_KEY = var.storage_secret_key
     READ_TOKEN         = var.read_token
     ADMIN_TOKEN        = var.admin_token
+    INFO_CONFIG_JSON   = var.information_config
   }
 }
 output "function_host" { value = tencentcloud_scf_function.media.host }

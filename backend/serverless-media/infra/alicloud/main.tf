@@ -63,6 +63,7 @@ resource "alicloud_fcv3_function" "media" {
     STORAGE_SECRET_KEY = var.storage_secret_key
     READ_TOKEN         = var.read_token
     ADMIN_TOKEN        = var.admin_token
+    INFO_CONFIG_JSON   = var.information_config
   }
 }
 resource "alicloud_fcv3_trigger" "http" {

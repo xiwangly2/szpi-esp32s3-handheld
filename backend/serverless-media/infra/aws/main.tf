@@ -97,6 +97,7 @@ resource "aws_lambda_function" "media" {
       STORAGE_REGION   = var.region
       READ_TOKEN       = var.read_token
       ADMIN_TOKEN      = var.admin_token
+      INFO_CONFIG_JSON = var.information_config
     }
   }
   depends_on = [aws_iam_role_policy.media]

@@ -1,8 +1,12 @@
 import { AwsClient } from 'aws4fetch';
 import { createMediaService } from './service.mjs';
+import { createInformationProvider } from './information.mjs';
+
+const providers = new WeakMap();
 
 export default {
   async fetch(request, env) {
+    if (!providers.has(env)) providers.set(env, createInformationProvider(env.INFO_CONFIG_JSON));
     const signer = new AwsClient({ accessKeyId: env.R2_ACCESS_KEY_ID, secretAccessKey: env.R2_SECRET_ACCESS_KEY,
       service: 's3', region: 'auto' });
     const signed = async (key, method, expires, headers = {}) => {
@@ -19,6 +23,7 @@ export default {
         return { url: await signed(key, 'PUT', seconds, headers), headers };
       },
     };
-    return createMediaService({ store, readToken: env.READ_TOKEN, adminToken: env.ADMIN_TOKEN })(request);
+    return createMediaService({ store, readToken: env.READ_TOKEN, adminToken: env.ADMIN_TOKEN,
+      information: providers.get(env) })(request);
   },
 };

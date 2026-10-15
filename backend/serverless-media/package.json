@@ -18,6 +18,7 @@
     "ali-oss": "6.23.0",
     "aws4fetch": "1.0.20",
     "cos-nodejs-sdk-v5": "3.0.0",
+    "saxes": "6.0.0",
     "xml2js": "0.6.2"
   },
   "devDependencies": {

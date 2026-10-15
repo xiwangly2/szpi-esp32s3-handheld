@@ -34,7 +34,7 @@ async function readSmallJson(request) {
   return JSON.parse(new TextDecoder().decode(data));
 }
 
-export function createMediaService({ store, readToken, adminToken }) {
+export function createMediaService({ store, readToken, adminToken, information }) {
   if (!store || readToken?.length < 24 || adminToken?.length < 24 || !readToken || !adminToken || readToken === adminToken) {
     throw new Error('Storage and separate read/admin tokens are required');
   }
@@ -47,6 +47,11 @@ export function createMediaService({ store, readToken, adminToken }) {
     const token = bearer || (upload ? '' : url.searchParams.get('key') || '');
     const admin = await equalToken(token, adminToken);
     if (!(admin || (!upload && await equalToken(token, readToken)))) return json({ error: 'Unauthorized' }, 401);
+    if (url.pathname === '/info') {
+      if (request.method !== 'GET') return json({ error: 'Method not allowed' }, 405);
+      if (!information) return json({ error: 'Information service not configured' }, 503);
+      return json(await information());
+    }
     const match = /^\/(media|uploads)\/([^/]+)$/.exec(url.pathname);
     if (!match) return json({ error: 'Not found' }, 404);
     let name;

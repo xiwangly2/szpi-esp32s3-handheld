@@ -78,6 +78,7 @@ PHP API 默认 key 是 `change-me`，部署时复制 `backend/image-api/config.s
 - [视频播放与转码](docs/video.md)
 - [IP 相机预览与配置](docs/ip-camera.md)
 - [Serverless 多云后端与 Terraform 部署](backend/serverless-media/README.md)
+- [联网信息台：天气、RSS、服务状态](docs/information-desk.md)
 - [Roadmap](docs/roadmap.md)
 - [Release Build](docs/release.md)
 

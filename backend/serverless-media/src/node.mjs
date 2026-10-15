@@ -1,5 +1,6 @@
 import { webcrypto } from 'node:crypto';
 import { createMediaService } from './service.mjs';
+import { createInformationProvider } from './information.mjs';
 import { s3Storage } from './s3.mjs';
 import { cosStorage, ossStorage } from './other-storage.mjs';
 globalThis.crypto ??= webcrypto;
@@ -9,7 +10,8 @@ export function nodeService(env = process.env) {
   const type = env.STORAGE_PROVIDER || 's3';
   const factory = { s3: s3Storage, cos: cosStorage, oss: ossStorage }[type];
   if (!factory) throw new Error('Unsupported storage provider');
-  return createMediaService({ store: factory(env), readToken: env.READ_TOKEN, adminToken: env.ADMIN_TOKEN });
+  return createMediaService({ store: factory(env), readToken: env.READ_TOKEN, adminToken: env.ADMIN_TOKEN,
+    information: createInformationProvider(env.INFO_CONFIG_JSON) });
 }
 
 // API Gateway HTTP API v2, Lambda URLs, and SCF API Gateway event envelopes.

@@ -1,0 +1,7 @@
+{
+  "weather": { "label": "深圳（示例）", "latitude": 22.54, "longitude": 114.06 },
+  "feeds": [
+    { "label": "ESP32 Camera", "url": "https://github.com/espressif/esp32-camera/releases.atom" }
+  ],
+  "statusProviders": ["github", "cloudflare"]
+}
