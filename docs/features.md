@@ -50,6 +50,23 @@ Files above those limits show a size message instead of being decoded
 automatically. This keeps large media from blocking the UI thread or causing
 repeated refresh glitches on a small embedded display.
 
+Text contents are converted to UTF-8 before LVGL sees them. Auto mode honors
+UTF-8/UTF-16 BOMs, accepts strictly valid UTF-8, then falls back to GBK/CP936
+(the common Simplified-Chinese Windows ANSI code page). The header also offers
+manual UTF-8, GBK, UTF-16LE and UTF-16BE selection for ambiguous files. Changing
+the selection reuses the same bounded raw prefix and never rewrites the file.
+GBK uses the already-linked FatFs CP936 table; a filesystem's filename encoding
+does not automatically convert file contents. The input prefix is 4 KiB with
+one lookahead byte, and the UTF-8 buffer is capped at 12 KiB plus short notices,
+both in PSRAM. Partial trailing characters at the preview boundary are omitted,
+not split into invalid UTF-8. CRLF/CR normalize to LF, tabs to spaces; malformed
+sequences/control bytes become `?` with a replacement count.
+
+ANSI is not one universal encoding. Other legacy code pages and GB18030's
+four-byte extension are not supported by the GBK option. UTF-16 without a BOM
+needs explicit selection. Correct decoding does not add font coverage for every
+Unicode character. See [text preview checks](../tests/text-preview/README.md).
+
 Very large directories are paged in the touch file manager. Each page creates at
 most 80 visible rows, with previous/next rows for navigation and a hard browse
 guard at the first 2048 entries. This keeps LVGL object counts bounded on cards
