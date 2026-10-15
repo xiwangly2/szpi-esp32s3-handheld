@@ -164,3 +164,17 @@ The first post-setup cloud request exposed a cold-start timeout. The reader now
 retries the documented HTTP EAGAIN result on the same connection, with a
 12-second header deadline and cancellation checks between socket polls. This
 does not start repeated Lambda requests or disable certificate verification.
+
+On 2026-10-15, firmware `710aba9` retained the paired NVS profile across a flash
+and restart. The device logged a successful 1139-byte HTTP 200 response after
+an initial EAGAIN poll, accepted the payload, and fetched it again on reopening.
+The information worker reported 3796 bytes of minimum free stack on exit.
+The user confirmed all three tabs displayed and Back worked normally.
+
+The same device entered AP+STA mode, a phone joined and received a DHCP lease
+on the setup subnet, and the STA address answered both LAN ping probes during
+the hotspot session. The user confirmed the hotspot QR/join and webpage worked,
+and Internet information refresh still worked after closing setup. This is a
+bounded device check, not a long-duration, multi-client or every-phone guarantee.
+Local package: `release/szpi-esp32s3-handheld-710aba9-web-setup.bin`.
+SHA-256: `7BEB4BBD498CEA0DA94E857DB89F860DF1BCCF670CDA89B302493CBB850C138B`.
