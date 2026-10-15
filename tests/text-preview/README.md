@@ -50,3 +50,23 @@ resume. Restart and check persistence. Rapidly switch books during loading;
 only the current page may update. Check save failures/corrupt checkpoint fallback
 and returning to normal operation after cancelling a reader. Real display,
 timing, gesture, and power-loss behavior cannot be proven by host decoder tests.
+
+## Device Evidence
+
+On 2026-10-15 the user confirmed the encoding-only `1ffd163` firmware displayed
+Chinese correctly and allowed encoding selection/scrolling/Back, but reported
+that the long-text control still felt slow. It was superseded by the paginated
+reader in `26e9e3a`.
+
+For `26e9e3a`, COM6 logs recorded GBK reading through page 49 (offset 6824), past
+the previous 4096-byte preview cap, and UTF-8 page turns. Observed page-job times
+were 4-31 ms; these measure read/decode/layout/UI submission, not physical touch
+latency or LCD scanout. Reopening restored separate books at pages 48, 11 and
+24. Worker exits reported at least 3824 bytes of free stack. No panic appeared
+in this capture. The user confirmed smooth page turns, correct Chinese, and
+working resume. This is bounded acceptance; abrupt power loss, every encoding
+choice, read-only/full cards, and the maximum file/page limits remain broader
+test cases, not qualified by this short run.
+
+Packaged firmware: `release/szpi-esp32s3-handheld-26e9e3a-text-reader.bin`.
+SHA-256: `F5122DB8D881ABC39D897672D25B493552DDE3CF1C5D9B0DC093F788118C4E29`.

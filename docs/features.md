@@ -74,8 +74,9 @@ Progress and visited page boundaries are stored per file under
 `/szpi/cache/reader/` on the same TF or local filesystem, using two alternating
 records with checksums. Saves are debounced for 1.5 seconds and attempted on
 exit. Path, size, modification time, prefix fingerprint, encoding and layout
-version are checked before resuming. File changes or corrupt records reset to
-the start; a failed save is visible and does not prevent reading. The original
+version are checked before resuming. File changes reset to the start; a corrupt
+record falls back to the other valid slot, or to the start if both fail. A failed
+save is visible and does not prevent reading. The original
 book remains read-only. This is lightweight local resume, not a cloud bookshelf
 or a chapter/keyword index; font size and arbitrary-position jumps are not yet
 implemented. Power-loss behavior still needs dedicated hardware testing.
