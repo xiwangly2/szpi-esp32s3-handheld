@@ -218,7 +218,8 @@ static void worker(void *arg)
                 strlcpy(pending.url, update.url, sizeof(pending.url));
                 if (update.action == INFO_TOKEN_REPLACE) strlcpy(pending.token, update.token, sizeof(pending.token));
                 if (update.action == INFO_TOKEN_CLEAR) memset(pending.token, 0, sizeof(pending.token));
-                esp_err_t ret = save_config(&pending);
+                esp_err_t ret = info_setup_update_allowed(&update, s->config.url, *s->config.token != 0) ?
+                    save_config(&pending) : ESP_ERR_INVALID_ARG;
                 info_setup_finish_update(s->setup, ret == ESP_OK, pending.url, *pending.token != 0);
                 lvgl_port_lock(0);
                 if (!atomic_load(&s->closing)) {

@@ -149,6 +149,10 @@ static esp_err_t save_handler(httpd_req_t *req)
     }
     memset(body, 0, sizeof(body));
     xSemaphoreTake(s->lock, portMAX_DELAY);
+    if (!info_setup_update_allowed(&update, s->current_url, s->token_set)) {
+        xSemaphoreGive(s->lock); memset(&update, 0, sizeof(update));
+        return json_response(req, "400 Bad Request", "{\"error\":\"Changed URL requires an explicit token replacement or clear\"}");
+    }
     bool ok = active(s) && !s->busy && !s->saved;
     if (ok) { s->update = update; s->pending = s->busy = true; s->failed = false; }
     xSemaphoreGive(s->lock); memset(&update, 0, sizeof(update));
@@ -158,9 +162,17 @@ static esp_err_t save_handler(httpd_req_t *req)
 static esp_err_t open_socket(httpd_handle_t server, int fd)
 {
     info_setup_t *s = httpd_get_global_user_ctx(server);
-    struct sockaddr_in local; socklen_t size = sizeof(local);
-    if (getsockname(fd, (struct sockaddr *)&local, &size) || local.sin_family != AF_INET || local.sin_addr.s_addr != s->bind_ip) return ESP_FAIL;
-    return ESP_OK;
+    struct sockaddr_storage local = {0}; socklen_t size = sizeof(local);
+    if (getsockname(fd, (struct sockaddr *)&local, &size)) return ESP_FAIL;
+    if (local.ss_family == AF_INET) return ((struct sockaddr_in *)&local)->sin_addr.s_addr == s->bind_ip ? ESP_OK : ESP_FAIL;
+#if CONFIG_LWIP_IPV6
+    // ESP-IDF listens on an IPv6 dual-stack socket when IPv6 is compiled in.
+    if (local.ss_family == AF_INET6) {
+        const struct sockaddr_in6 *v6 = (const struct sockaddr_in6 *)&local;
+        return info_setup_ipv4_mapped_matches((const uint8_t *)&v6->sin6_addr, s->bind_ip) ? ESP_OK : ESP_FAIL;
+    }
+#endif
+    return ESP_FAIL;
 }
 
 static void retain_context(void *context) { (void)context; }

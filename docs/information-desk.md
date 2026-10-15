@@ -21,7 +21,10 @@ private `.deploy/info.ini` using `导入 INI`. This reads the file in the browse
 it does not require inserting a TF card. Saving writes the configuration to
 device NVS, then closes setup after five seconds and refreshes the information
 desk. Leaving the token empty retains it; replacement and clearing are explicit.
-Stored tokens are never read back through the web API. The portal configures
+Stored tokens are never read back through the web API.
+Changing the URL requires explicit token replacement/clear when a token exists;
+`keep` cannot redirect a saved credential to a different endpoint.
+The portal configures
 this information service only, not WLAN credentials or backend feed/location
 preferences. Those remain separate settings.
 

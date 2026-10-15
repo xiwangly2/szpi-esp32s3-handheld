@@ -1,6 +1,6 @@
 'use strict';
 const $ = id => document.getElementById(id);
-let session = '', busy = false;
+let session = '', busy = false, savedUrl = '', tokenSet = false;
 const notice = (message, error = false) => { $('notice').textContent = message; $('notice').classList.toggle('error', error); };
 const lock = value => { busy = value; document.querySelectorAll('button,input').forEach(control => { control.disabled = value; }); };
 
@@ -21,6 +21,7 @@ $('pair-form').addEventListener('submit', async event => {
   try {
     session = (await request('/api/pair', { pin: $('pin').value })).session;
     const config = await request('/api/config');
+    savedUrl = config.url; tokenSet = config.tokenSet;
     $('url').value = config.url; $('token-state').textContent = config.tokenSet ? '已保存，留空保留' : '尚未设置';
     $('pairing').hidden = true; $('settings').hidden = false; $('pin').value = ''; notice('');
   } catch (error) { session = ''; notice(error.message || '设备连接中断。', true); }
@@ -48,6 +49,9 @@ async function save(data) {
 $('config-form').addEventListener('submit', event => {
   event.preventDefault(); const token = $('token').value.trim();
   if ($('clear-token').checked && token) { notice('清除令牌与填写新令牌不能同时选择。', true); return; }
+  if (tokenSet && $('url').value.trim() !== savedUrl && !token && !$('clear-token').checked) {
+    notice('更换服务地址时，请重新填写令牌或选择清除。', true); return;
+  }
   save({ url: $('url').value.trim(), token, action: $('clear-token').checked ? 'clear' : token ? 'replace' : 'keep' });
 });
 $('reset').addEventListener('click', () => {

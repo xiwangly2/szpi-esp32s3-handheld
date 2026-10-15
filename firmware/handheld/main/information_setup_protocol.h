@@ -15,3 +15,5 @@ bool info_setup_parse_pin(const char *json, size_t length, char pin[INFO_SETUP_P
 bool info_setup_parse_update(const char *json, size_t length, info_setup_update_t *out);
 bool info_setup_secret_equal(const char *expected, const char *provided);
 bool info_setup_origin_valid(const char *host, const char *origin, const char *authority);
+bool info_setup_update_allowed(const info_setup_update_t *update, const char *current_url, bool token_set);
+bool info_setup_ipv4_mapped_matches(const uint8_t address[16], uint32_t expected_network_order);

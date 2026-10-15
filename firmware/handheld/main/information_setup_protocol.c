@@ -74,3 +74,14 @@ bool info_setup_origin_valid(const char *host, const char *origin, const char *a
     char expected[80]; snprintf(expected, sizeof(expected), "http://%s", authority);
     return !strcmp(origin, expected);
 }
+
+bool info_setup_update_allowed(const info_setup_update_t *update, const char *current_url, bool token_set)
+{
+    return update && current_url && (update->action != INFO_TOKEN_KEEP || !token_set || !strcmp(update->url, current_url));
+}
+
+bool info_setup_ipv4_mapped_matches(const uint8_t address[16], uint32_t expected_network_order)
+{
+    static const uint8_t prefix[12] = { 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0xff, 0xff };
+    return address && !memcmp(address, prefix, sizeof(prefix)) && !memcmp(address + 12, &expected_network_order, 4);
+}

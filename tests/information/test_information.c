@@ -15,6 +15,12 @@ int main(int argc, char **argv)
     for (size_t i = 0; i < sizeof(bad_pair)/sizeof(bad_pair[0]); i++) assert(!info_setup_parse_pin(bad_pair[i], strlen(bad_pair[i]), pin));
     const char *save = "{\"url\":\"https://example.com/info\",\"token\":\"new-token\",\"action\":\"replace\"}";
     assert(info_setup_parse_update(save, strlen(save), &update)); assert(update.action == INFO_TOKEN_REPLACE);
+    update.action = INFO_TOKEN_KEEP;
+    assert(info_setup_update_allowed(&update, "https://example.com/info", true));
+    assert(!info_setup_update_allowed(&update, "https://different.test/info", true));
+    assert(info_setup_update_allowed(&update, "https://different.test/info", false));
+    update.action = INFO_TOKEN_REPLACE;
+    assert(info_setup_update_allowed(&update, "https://different.test/info", true));
     const char *clear = "{\"url\":\"\",\"token\":\"\",\"action\":\"clear\"}";
     assert(info_setup_parse_update(clear, strlen(clear), &update)); assert(update.action == INFO_TOKEN_CLEAR);
     const char *bad_save[] = { "{\"url\":\"\",\"token\":\"\",\"action\":\"keep\"}",
@@ -29,6 +35,11 @@ int main(int argc, char **argv)
     assert(info_setup_origin_valid("172.30.42.1:8080", NULL, "172.30.42.1:8080"));
     assert(!info_setup_origin_valid("evil.test:8080", NULL, "172.30.42.1:8080"));
     assert(!info_setup_origin_valid("172.30.42.1:8080", "https://evil.test", "172.30.42.1:8080"));
+    uint8_t mapped[16] = {0,0,0,0,0,0,0,0,0,0,0xff,0xff,10,31,0,104};
+    uint32_t ip; memcpy(&ip, mapped + 12, 4);
+    assert(info_setup_ipv4_mapped_matches(mapped, ip));
+    mapped[15] = 105; assert(!info_setup_ipv4_mapped_matches(mapped, ip));
+    mapped[15] = 104; mapped[10] = 0; assert(!info_setup_ipv4_mapped_matches(mapped, ip));
     assert(info_url_valid("https://example.com/info"));
     assert(info_url_valid(""));
     assert(!info_url_valid("http://example.com/info"));
