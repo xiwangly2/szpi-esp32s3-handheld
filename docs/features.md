@@ -43,7 +43,7 @@ Large previews are guarded before LVGL receives the file:
 - JPG: up to 768 KB, decoded in a worker task with a PSRAM largest-block check
 - PNG: up to 256 KB
 - GIF: up to 256 KB
-- text: only the first 4 KB is loaded into the text preview
+- text: a single-screen paginated reader, up to 8 MiB / 65536 indexed pages
 - audio: files above 128 MB are skipped by the touch preview/player entry
 
 Files above those limits show a size message instead of being decoded
@@ -53,14 +53,32 @@ repeated refresh glitches on a small embedded display.
 Text contents are converted to UTF-8 before LVGL sees them. Auto mode honors
 UTF-8/UTF-16 BOMs, accepts strictly valid UTF-8, then falls back to GBK/CP936
 (the common Simplified-Chinese Windows ANSI code page). The header also offers
-manual UTF-8, GBK, UTF-16LE and UTF-16BE selection for ambiguous files. Changing
-the selection reuses the same bounded raw prefix and never rewrites the file.
+manual UTF-8, GBK, UTF-16LE and UTF-16BE selection for ambiguous files. The
+detected encoding stays fixed for the book; changing it returns to the start
+and rebuilds page boundaries, never rewriting the original text.
 GBK uses the already-linked FatFs CP936 table; a filesystem's filename encoding
-does not automatically convert file contents. The input prefix is 4 KiB with
-one lookahead byte, and the UTF-8 buffer is capped at 12 KiB plus short notices,
-both in PSRAM. Partial trailing characters at the preview boundary are omitted,
-not split into invalid UTF-8. CRLF/CR normalize to LF, tabs to spaces; malformed
-sequences/control bytes become `?` with a replacement count.
+does not automatically convert file contents. A background worker reads 2 KiB
+windows with one lookahead byte and converts into a bounded 6 KiB UTF-8 buffer
+in PSRAM. LVGL's own line breaker fits only the visible lines. A source-byte
+map preserves exact page boundaries across GBK/UTF-8/UTF-16 and CRLF sequences.
+CRLF/CR normalize to LF, tabs to spaces; malformed sequences/control bytes
+become `?`, with replacement counts recorded in diagnostics.
+
+Swipe left/right across the text or use the footer arrows to turn pages. The
+footer shows the page number and byte-based progress. At most 256 KiB of PSRAM
+holds visited page offsets; it is an index, not a full-book text allocation.
+Reading and bookmark I/O happen off the LVGL task. There is one reader worker
+with a replaceable pending request; deleting a page cancels it safely.
+
+Progress and visited page boundaries are stored per file under
+`/szpi/cache/reader/` on the same TF or local filesystem, using two alternating
+records with checksums. Saves are debounced for 1.5 seconds and attempted on
+exit. Path, size, modification time, prefix fingerprint, encoding and layout
+version are checked before resuming. File changes or corrupt records reset to
+the start; a failed save is visible and does not prevent reading. The original
+book remains read-only. This is lightweight local resume, not a cloud bookshelf
+or a chapter/keyword index; font size and arbitrary-position jumps are not yet
+implemented. Power-loss behavior still needs dedicated hardware testing.
 
 ANSI is not one universal encoding. Other legacy code pages and GB18030's
 four-byte extension are not supported by the GBK option. UTF-16 without a BOM

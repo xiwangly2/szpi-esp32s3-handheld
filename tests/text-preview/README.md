@@ -34,8 +34,19 @@ On 2026-10-15, six user-provided samples (five CP936 and one UTF-8, from 311 to
 preview prefixes. Their original files were read only, not rewritten or added
 to the repository. This establishes conversion correctness, not LCD rendering.
 
-Device checks: open an existing GBK sample from TF, scroll, switch between Auto
+The mapped-window decoder is additionally checked by slicing long generated
+GBK and UTF-8 texts into thousands of small pages and reassembling them. The
+result must exactly match normalized text, including CRLF split at a read
+boundary, with no skipped/duplicated characters. Optional Windows file arguments
+also run a full-file mapped-page comparison against the Windows decoder. Only
+the initial 4 KiB comparisons above were run on the user's original six samples;
+the card was back in the device before the new full-file host test was available.
+
+Device checks: open an existing GBK sample from TF, swipe left/right, switch between Auto
 and GBK, and return; then open an existing UTF-8 sample. Confirm Chinese text,
-header selection and scrolling are usable. Repeat from the media library and
-on-board file browser. Check large files still stop at the bounded prefix,
-and exiting/reopening does not retain a previous file's state or leak buffers.
+header selection and page turns are usable. Repeat from the media library and
+on-board file browser. Read past the old 4 KiB limit, then exit/reopen and check
+resume. Restart and check persistence. Rapidly switch books during loading;
+only the current page may update. Check save failures/corrupt checkpoint fallback
+and returning to normal operation after cancelling a reader. Real display,
+timing, gesture, and power-loss behavior cannot be proven by host decoder tests.

@@ -96,22 +96,24 @@ const char *text_encoding_name(text_encoding_t encoding)
     }
 }
 
-bool text_preview_decode(const uint8_t *input, size_t length, bool has_more,
-                         text_encoding_t requested, char *output, size_t capacity,
-                         text_decode_result_t *result)
+bool text_preview_decode_window(const uint8_t *input, size_t length, bool has_more, bool at_start,
+                                text_encoding_t requested, char *output, size_t capacity,
+                                uint16_t *source_end, text_decode_result_t *result)
 {
     if (result) memset(result, 0, sizeof(*result));
     if (output && capacity) output[0] = 0;
-    if ((!input && length) || !output || !capacity || !result || requested < TEXT_ENCODING_AUTO || requested > TEXT_ENCODING_UTF16BE) return false;
+    if ((!input && length) || !output || !capacity || !result || (source_end && length > UINT16_MAX) ||
+        requested < TEXT_ENCODING_AUTO || requested > TEXT_ENCODING_UTF16BE) return false;
     text_encoding_t bom = TEXT_ENCODING_AUTO; size_t bom_bytes = 0;
-    if (length >= 3 && !memcmp(input, "\xef\xbb\xbf", 3)) { bom = TEXT_ENCODING_UTF8; bom_bytes = 3; }
-    else if (length >= 2 && input[0] == 0xff && input[1] == 0xfe) { bom = TEXT_ENCODING_UTF16LE; bom_bytes = 2; }
-    else if (length >= 2 && input[0] == 0xfe && input[1] == 0xff) { bom = TEXT_ENCODING_UTF16BE; bom_bytes = 2; }
+    if (at_start && length >= 3 && !memcmp(input, "\xef\xbb\xbf", 3)) { bom = TEXT_ENCODING_UTF8; bom_bytes = 3; }
+    else if (at_start && length >= 2 && input[0] == 0xff && input[1] == 0xfe) { bom = TEXT_ENCODING_UTF16LE; bom_bytes = 2; }
+    else if (at_start && length >= 2 && input[0] == 0xfe && input[1] == 0xff) { bom = TEXT_ENCODING_UTF16BE; bom_bytes = 2; }
     text_encoding_t encoding = requested;
     if (encoding == TEXT_ENCODING_AUTO) encoding = bom != TEXT_ENCODING_AUTO ? bom :
         utf8_prefix_valid(input, length, has_more) ? TEXT_ENCODING_UTF8 : TEXT_ENCODING_GBK;
     result->encoding = encoding;
     size_t i = bom == encoding ? bom_bytes : 0, written = 0;
+    if (source_end) source_end[0] = (uint16_t)i;
     bool previous_cr = false;
     while (i < length) {
         uint32_t cp = 0; size_t used = 1;
@@ -119,18 +121,35 @@ bool text_preview_decode(const uint8_t *input, size_t length, bool has_more,
             encoding == TEXT_ENCODING_GBK ? gbk_next(input + i, length - i, &cp, &used) :
             utf16_next(input + i, length - i, encoding == TEXT_ENCODING_UTF16LE, &cp, &used);
         if (state == DECODE_INCOMPLETE && has_more) { result->incomplete_tail = true; break; }
+        if (state == DECODE_OK && cp == '\r' && has_more && i + used == length) {
+            result->incomplete_tail = true; break;
+        }
         bool replaced = state != DECODE_OK;
         if (replaced) cp = '?';
-        if (cp == '\n' && previous_cr) { previous_cr = false; i += used; continue; }
+        if (cp == '\n' && previous_cr) {
+            previous_cr = false; i += used;
+            if (source_end) source_end[written] = (uint16_t)i;
+            continue;
+        }
         previous_cr = cp == '\r';
         if (cp == '\r') cp = '\n';
         if (cp == '\t') cp = ' ';
         if ((cp < 0x20 && cp != '\n') || cp == 0x7f) { cp = '?'; replaced = true; }
         char encoded[4]; size_t bytes = encode_utf8(cp, encoded);
         if (bytes > capacity - 1 - written) { result->output_truncated = true; break; }
-        memcpy(output + written, encoded, bytes); written += bytes; i += used;
+        memcpy(output + written, encoded, bytes);
+        if (source_end) for (size_t j = 0; j < bytes; j++) source_end[written + j] = (uint16_t)i;
+        written += bytes; i += used;
+        if (source_end) source_end[written] = (uint16_t)i;
         if (replaced) result->replacements++;
     }
     output[written] = 0; result->input_consumed = i; result->output_size = written;
     return true;
+}
+
+bool text_preview_decode(const uint8_t *input, size_t length, bool has_more,
+                         text_encoding_t requested, char *output, size_t capacity,
+                         text_decode_result_t *result)
+{
+    return text_preview_decode_window(input, length, has_more, true, requested, output, capacity, NULL, result);
 }

@@ -25,10 +25,11 @@ existing card data. Run from the repository root:
 6. Return home, reopen the media library, and play an audio file. Leaving the
    music player must return to the media library; file-manager playback must
    return to its source directory.
-7. Open GBK/CP936 and UTF-8 texts, scroll, change the header encoding selection,
+7. Open GBK/CP936 and UTF-8 texts, turn pages, change the header encoding selection,
    then return and reopen. Both should render Chinese without modifying the
-   source file. Check BOM-marked UTF-16 too when available. A large text remains
-   limited to its first 4 KiB; a split trailing character must not create boxes.
+   source file. Check BOM-marked UTF-16 too when available. Read past 4 KiB,
+   return and reopen to confirm per-book progress. A split trailing character
+   or CRLF must not create boxes, duplicate newlines, or skip text.
    Host conversion checks are in [text-preview](../text-preview/README.md).
 
 The serial log records `JPEG preview shown` for committed images and

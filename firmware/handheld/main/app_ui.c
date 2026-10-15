@@ -7,7 +7,7 @@
 #include "video_player.h"
 #include "ip_camera_app.h"
 #include "information_app.h"
-#include "text_preview_encoding.h"
+#include "text_reader.h"
 #include "esp_partition.h"
 #include "file_iterator.h"
 #include "string.h"
@@ -1097,15 +1097,12 @@ static lv_obj_t *s_sdmgr_info_label;
 #define SDCARD_PREVIEW_W BSP_LCD_H_RES
 #define SDCARD_PREVIEW_H (BSP_LCD_V_RES - SDCARD_PREVIEW_TOP)
 #define SDCARD_PREVIEW_FULL_H BSP_LCD_V_RES
-#define SDCARD_TEXT_PREVIEW_LIMIT 4096
 #define SDCARD_IMAGE_PREVIEW_LIMIT (768 * 1024)
 #define SDCARD_PNG_PREVIEW_LIMIT (256 * 1024)
 #define SDCARD_GIF_PREVIEW_LIMIT (256 * 1024)
 #define SDCARD_AUDIO_PLAY_LIMIT (128 * 1024 * 1024)
 #define SDCARD_LIST_PAGE_SIZE 80
 #define SDCARD_LIST_MAX_ITEMS 2048
-#define SDCARD_TEXT_PREVIEW_EXTRA 96
-#define SDCARD_TEXT_UTF8_LIMIT (SDCARD_TEXT_PREVIEW_LIMIT * 3)
 #define SDCARD_JPEG_CANVAS_BYTES (SDCARD_PREVIEW_W * SDCARD_PREVIEW_FULL_H * sizeof(uint16_t))
 #define SDCARD_SPIRAM_SAFETY_MARGIN (256 * 1024)
 
@@ -1146,14 +1143,6 @@ static lv_obj_t *s_preview_title;
 static lv_obj_t *s_preview_body;
 static lv_obj_t *s_preview_media_obj;
 static bool s_preview_fullscreen;
-typedef struct {
-    uint8_t *raw;
-    char *utf8;
-    size_t length;
-    bool truncated;
-    lv_obj_t *text, *encoding;
-} text_preview_state_t;
-static text_preview_state_t *s_text_preview;
 static bool s_lv_fs_ready;
 static uint32_t s_sd_preview_generation;
 static size_t s_sd_list_offset;
@@ -1438,9 +1427,6 @@ static void sd_preview_clear_current(void)
     s_preview_body = NULL;
     s_preview_media_obj = NULL;
     s_preview_fullscreen = false;
-    if (s_text_preview) {
-        free(s_text_preview->raw); free(s_text_preview->utf8); free(s_text_preview); s_text_preview = NULL;
-    }
     if (s_preview_img_buf != NULL) {
         lv_img_cache_invalidate_src(&s_preview_img_dsc);
         heap_caps_free(s_preview_img_buf);
@@ -1539,89 +1525,14 @@ static void sd_preview_message(const char *title, const char *message)
     lvgl_port_unlock();
 }
 
-static void sd_preview_text_render(text_preview_state_t *state, text_encoding_t encoding)
-{
-    text_decode_result_t result;
-    if (!text_preview_decode(state->raw, state->length, state->truncated, encoding,
-                             state->utf8, SDCARD_TEXT_UTF8_LIMIT + 1, &result)) return;
-    size_t used = result.output_size;
-    if (state->truncated || result.output_truncated) {
-        used += (size_t)snprintf(state->utf8 + used, SDCARD_TEXT_PREVIEW_EXTRA,
-                                "\n\n...仅显示前 %u KiB", (unsigned)(SDCARD_TEXT_PREVIEW_LIMIT / 1024));
-    }
-    if (result.replacements) {
-        snprintf(state->utf8 + used, SDCARD_TEXT_UTF8_LIMIT + SDCARD_TEXT_PREVIEW_EXTRA + 1 - used,
-                 "\n[无法解码: %u]", (unsigned)result.replacements);
-    }
-    lv_textarea_set_text(state->text, state->utf8);
-    lv_textarea_set_cursor_pos(state->text, 0);
-    lv_obj_scroll_to_y(state->text, 0, LV_ANIM_OFF);
-    ESP_LOGI(TAG, "Text preview: encoding=%s input=%u output=%u replacements=%u clipped=%d",
-             text_encoding_name(result.encoding), (unsigned)state->length, (unsigned)result.output_size,
-             (unsigned)result.replacements, state->truncated || result.output_truncated);
-}
-
-static void sd_preview_text_encoding_cb(lv_event_t *event)
-{
-    text_preview_state_t *state = lv_event_get_user_data(event);
-    if (state != s_text_preview) return;
-    sd_preview_text_render(state, (text_encoding_t)lv_dropdown_get_selected(state->encoding));
-}
-
 static void sd_preview_text(const char *path, off_t file_size)
 {
-    FILE *f = fopen(path, "rb");
-    if (f == NULL) {
-        sd_preview_message("文本预览", "文件打开失败");
-        return;
-    }
-
-    text_preview_state_t *state = calloc(1, sizeof(*state));
-    if (state) {
-        state->raw = heap_caps_malloc(SDCARD_TEXT_PREVIEW_LIMIT + 1, MALLOC_CAP_8BIT | MALLOC_CAP_SPIRAM);
-        state->utf8 = heap_caps_malloc(SDCARD_TEXT_UTF8_LIMIT + SDCARD_TEXT_PREVIEW_EXTRA + 1, MALLOC_CAP_8BIT | MALLOC_CAP_SPIRAM);
-    }
-    if (!state || !state->raw || !state->utf8) {
-        fclose(f);
-        if (state) { free(state->raw); free(state->utf8); free(state); }
-        sd_preview_message("文本预览", "内存不足");
-        return;
-    }
-
-    size_t len = fread(state->raw, 1, SDCARD_TEXT_PREVIEW_LIMIT + 1, f);
-    bool read_failed = ferror(f);
-    fclose(f);
-    if (read_failed) {
-        free(state->raw); free(state->utf8); free(state);
-        sd_preview_message("文本预览", "文件读取失败"); return;
-    }
-    state->truncated = len > SDCARD_TEXT_PREVIEW_LIMIT || file_size > (off_t)SDCARD_TEXT_PREVIEW_LIMIT;
-    state->length = len > SDCARD_TEXT_PREVIEW_LIMIT ? SDCARD_TEXT_PREVIEW_LIMIT : len;
-    text_decode_result_t detected;
-    text_preview_decode(state->raw, state->length, state->truncated, TEXT_ENCODING_AUTO,
-                        state->utf8, SDCARD_TEXT_UTF8_LIMIT + 1, &detected);
-
+    (void)file_size;
     lvgl_port_lock(0);
-    lv_obj_t *body = sd_preview_create_page("文本");
-    s_text_preview = state;
-    lv_obj_set_width(s_preview_title, 52);
-    lv_obj_align(s_preview_title, LV_ALIGN_LEFT_MID, 62, 0);
-    state->encoding = lv_dropdown_create(s_preview_bar);
-    lv_obj_set_size(state->encoding, 190, 34);
-    lv_obj_align(state->encoding, LV_ALIGN_RIGHT_MID, -2, 0);
-    lv_obj_set_style_text_font(state->encoding, &lv_font_montserrat_14, 0);
-    char options[96];
-    snprintf(options, sizeof(options), "Auto: %s\nUTF-8\nGBK / ANSI\nUTF-16LE\nUTF-16BE", text_encoding_name(detected.encoding));
-    lv_dropdown_set_options(state->encoding, options);
-    lv_obj_add_event_cb(state->encoding, sd_preview_text_encoding_cb, LV_EVENT_VALUE_CHANGED, state);
-    lv_obj_t *ta = lv_textarea_create(body);
-    lv_obj_set_size(ta, 312, 192);
-    lv_obj_align(ta, LV_ALIGN_CENTER, 0, 0);
-    lv_textarea_set_cursor_click_pos(ta, false);
-    lv_obj_set_style_text_font(ta, &font_alipuhui20, 0);
-    state->text = ta;
-    sd_preview_text_render(state, TEXT_ENCODING_AUTO);
+    lv_obj_t *body = sd_preview_create_page("阅读");
+    esp_err_t ret = text_reader_open(sdcard_preview_page, s_preview_bar, body, s_preview_title, path);
     lvgl_port_unlock();
+    if (ret != ESP_OK) sd_preview_message("文本阅读", "阅读器启动失败");
 }
 
 static void sd_build_lv_path(const char *path, char *out, size_t out_len)

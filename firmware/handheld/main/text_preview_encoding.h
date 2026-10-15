@@ -24,3 +24,9 @@ const char *text_encoding_name(text_encoding_t encoding);
 bool text_preview_decode(const uint8_t *input, size_t length, bool has_more,
                          text_encoding_t requested, char *output, size_t capacity,
                          text_decode_result_t *result);
+
+// Optional source_end has capacity entries. Valid UTF-8 boundaries map back to
+// byte offsets in this input window. Mapped windows must fit in UINT16_MAX bytes.
+bool text_preview_decode_window(const uint8_t *input, size_t length, bool has_more, bool at_start,
+                                text_encoding_t requested, char *output, size_t capacity,
+                                uint16_t *source_end, text_decode_result_t *result);

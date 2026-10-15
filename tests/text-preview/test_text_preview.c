@@ -94,7 +94,92 @@ static void malformed_inputs(void)
     }
 }
 
+static void source_offsets(void)
+{
+    const uint8_t data[] = {0xff,0xfe,0x2d,0x4e,'\r',0,'\n',0,0x87,0x65};
+    char output[64]; uint16_t map[64]; text_decode_result_t result;
+    assert(text_preview_decode_window(data, sizeof(data), false, true, TEXT_ENCODING_AUTO, output, sizeof(output), map, &result));
+    assert(!strcmp(output, "\xe4\xb8\xad\n\xe6\x96\x87"));
+    assert(map[0] == 2 && map[3] == 4 && map[4] == 8 && map[7] == 10);
+    const uint8_t newline_boundary[] = {'A','\r'};
+    assert(text_preview_decode_window(newline_boundary, 2, true, false, TEXT_ENCODING_UTF8, output, sizeof(output), map, &result));
+    assert(!strcmp(output, "A") && map[1] == 1 && result.incomplete_tail);
+    const uint8_t middle_bom[] = {0xef,0xbb,0xbf,'A'};
+    assert(text_preview_decode_window(middle_bom, sizeof(middle_bom), false, false, TEXT_ENCODING_UTF8, output, sizeof(output), map, &result));
+    assert(result.output_size == 4 && map[3] == 3 && map[4] == 4);
+}
+
+static void paging_roundtrip(void)
+{
+    const char *lines[] = { "\xd6\xd0\xce\xc4\r\nABC\t\n", "\xe4\xb8\xad\xe6\x96\x87\r\nABC\t\n" };
+    const char *expected_line = "\xe4\xb8\xad\xe6\x96\x87\nABC \n";
+    for (unsigned kind = 0; kind < 2; kind++) {
+        size_t line_size = strlen(lines[kind]), expected_size = strlen(expected_line);
+        size_t size = line_size * 4000, expected_total = expected_size * 4000;
+        uint8_t *input = malloc(size); char *actual = calloc(1, size * 3 + 1); assert(input && actual);
+        for (unsigned i = 0; i < 4000; i++) memcpy(input + i * line_size, lines[kind], line_size);
+        size_t offset = 0, written = 0; text_encoding_t encoding = TEXT_ENCODING_AUTO;
+        while (offset < size) {
+            char window[128]; uint16_t map[128]; text_decode_result_t result;
+            size_t remaining = size - offset, length = remaining > 37 ? 37 : remaining;
+            assert(text_preview_decode_window(input + offset, length, remaining > length, offset == 0, encoding,
+                                              window, sizeof(window), map, &result));
+            encoding = result.encoding; assert(result.replacements == 0);
+            size_t end = 0; unsigned characters = 0;
+            while (window[end]) {
+                if (((uint8_t)window[end] & 0xc0) != 0x80 && characters++ == 7) break;
+                end++;
+            }
+            assert(map[end] && offset + map[end] <= size);
+            memcpy(actual + written, window, end); written += end; offset += map[end];
+        }
+        assert(written == expected_total);
+        for (unsigned i = 0; i < 4000; i++) assert(!memcmp(actual + i * expected_size, expected_line, expected_size));
+        free(actual); free(input);
+    }
+}
+
 #ifdef _WIN32
+static void real_book(const wchar_t *path)
+{
+    FILE *file = _wfopen(path, L"rb"); assert(file);
+    assert(!fseek(file, 0, SEEK_END)); long size = ftell(file); assert(size > 0 && size <= 8 * 1024 * 1024);
+    rewind(file); uint8_t *raw = malloc((size_t)size); assert(raw);
+    assert(fread(raw, 1, (size_t)size, file) == (size_t)size); fclose(file);
+    char *actual = calloc(1, (size_t)size * 3 + 1); assert(actual);
+    size_t offset = 0, written = 0; unsigned pages = 0; text_encoding_t encoding = TEXT_ENCODING_AUTO;
+    while (offset < (size_t)size) {
+        char window[6145]; uint16_t map[6145]; text_decode_result_t result;
+        size_t remaining = (size_t)size - offset, length = remaining > 2048 ? 2048 : remaining;
+        assert(text_preview_decode_window(raw + offset, length, remaining > length, offset == 0, encoding,
+                                          window, sizeof(window), map, &result));
+        encoding = result.encoding; assert(result.replacements == 0);
+        size_t end = 0; unsigned characters = 0;
+        while (window[end]) {
+            if (((uint8_t)window[end] & 0xc0) != 0x80 && characters++ == 80) break;
+            end++;
+        }
+        assert(map[end] > 0 && offset + map[end] <= (size_t)size);
+        memcpy(actual + written, window, end); written += end; offset += map[end]; pages++;
+    }
+    actual[written] = 0;
+    wchar_t *decoded = malloc(((size_t)size + 1) * sizeof(*decoded)); assert(decoded);
+    size_t start = size >= 3 && !memcmp(raw, "\xef\xbb\xbf", 3) ? 3 : 0;
+    int count = MultiByteToWideChar(encoding == TEXT_ENCODING_GBK ? 936 : CP_UTF8, MB_ERR_INVALID_CHARS,
+                                  (const char *)raw + start, (int)((size_t)size - start), decoded, (int)size + 1);
+    assert(count > 0); int n = 0; bool cr = false;
+    for (int i = 0; i < count; i++) {
+        wchar_t c = decoded[i]; if (c == '\n' && cr) { cr = false; continue; }
+        cr = c == '\r'; if (c == '\r') c = '\n'; if (c == '\t') c = ' ';
+        if ((c < 32 && c != '\n') || c == 127) c = '?'; decoded[n++] = c;
+    }
+    char *expected = calloc(1, (size_t)size * 3 + 1); assert(expected);
+    int bytes = WideCharToMultiByte(CP_UTF8, 0, decoded, n, expected, (int)size * 3, NULL, NULL);
+    assert(bytes >= 0 && (size_t)bytes == written && !memcmp(actual, expected, written));
+    printf("Full-file mapped paging matched Windows: pages=%u bytes=%zu\n", pages, written);
+    free(expected); free(decoded); free(actual); free(raw);
+}
+
 static void real_file(const wchar_t *path)
 {
     FILE *file = _wfopen(path, L"rb"); assert(file);
@@ -129,9 +214,9 @@ int wmain(int argc, wchar_t **argv)
 int main(int argc, char **argv)
 #endif
 {
-    samples(); boundaries(); malformed_inputs();
+    samples(); boundaries(); malformed_inputs(); source_offsets(); paging_roundtrip();
 #ifdef _WIN32
-    for (int i = 1; i < argc; i++) real_file(argv[i]);
+    for (int i = 1; i < argc; i++) { real_file(argv[i]); real_book(argv[i]); }
 #else
     (void)argc; (void)argv;
 #endif

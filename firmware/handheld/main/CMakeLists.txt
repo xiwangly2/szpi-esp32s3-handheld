@@ -1,6 +1,7 @@
 idf_component_register(SRCS "esp32_s3_szp.c" "main.c" "app_ui.c" "random_image_app.c"
                        SRCS "device_storage.c" "sdcard_layout.c"
                        SRCS "text_preview_encoding.c"
+                       SRCS "text_reader.c"
                        SRCS "wifi_qr_payload.c" "wifi_qr_scanner.c"
                        SRCS "video_player.c" "extractor_log_compat.c"
                        SRCS "ip_camera_app.c" "ip_camera_stream.c"
