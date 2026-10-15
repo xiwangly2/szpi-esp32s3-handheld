@@ -1,0 +1,36 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>SZPI 设备设置</title>
+  <link rel="stylesheet" href="/setup.css">
+  <script src="/setup.js" defer></script>
+</head>
+<body>
+  <header><strong>SZPI Handheld</strong><span>设备设置</span></header>
+  <main>
+    <section id="pairing" aria-labelledby="pair-title">
+      <h1 id="pair-title">连接设备</h1>
+      <form id="pair-form">
+        <label for="pin">屏幕配对码</label>
+        <div class="pair-row"><input id="pin" name="pin" inputmode="numeric" pattern="[0-9]{6}" maxlength="6" autocomplete="one-time-code" required><button type="submit">配对</button></div>
+      </form>
+    </section>
+    <section id="settings" hidden aria-labelledby="settings-title">
+      <div class="section-title"><h1 id="settings-title">信息台</h1><span class="badge" id="connection">已配对</span></div>
+      <form id="config-form">
+        <label for="url">服务地址</label>
+        <input id="url" name="url" type="url" maxlength="383" placeholder="https://example.com/info" required spellcheck="false" autocapitalize="off">
+        <label for="token">只读令牌 <span id="token-state"></span></label>
+        <div class="token-row"><input id="token" name="token" type="password" maxlength="96" autocomplete="off" spellcheck="false" autocapitalize="off"><button type="button" id="reveal" aria-label="显示令牌" aria-pressed="false">显示</button></div>
+        <label class="check"><input id="clear-token" type="checkbox">清除已存令牌</label>
+        <div class="actions"><label class="file-button" for="config-file">导入 INI<input id="config-file" type="file" accept=".ini,text/plain"></label><button type="submit" id="save">保存到设备</button></div>
+      </form>
+      <div class="danger"><button type="button" id="reset">清除配置</button></div>
+    </section>
+    <p id="notice" role="status" aria-live="polite"></p>
+    <footer>本地连接 · 五分钟配对窗口</footer>
+  </main>
+</body>
+</html>

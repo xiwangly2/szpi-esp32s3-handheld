@@ -1,5 +1,6 @@
 #include "information_app.h"
 #include "information_payload.h"
+#include "information_setup.h"
 #include "esp32_s3_szp.h"
 #include "esp_crt_bundle.h"
 #include "esp_heap_caps.h"
@@ -19,15 +20,24 @@ LV_FONT_DECLARE(font_alipuhui20);
 typedef struct { char url[INFO_URL_SIZE], token[INFO_TOKEN_SIZE]; } info_config_t;
 typedef struct {
     lv_obj_t *page, *list, *status, *tabs, *gear, *editor, *address, *token, *keyboard, *edit_status;
+    lv_obj_t *setup_page, *setup_content, *setup_toggle, *setup_status;
+    info_setup_t *setup;
+    info_setup_details_t setup_details;
     info_config_t config, pending_config;
     info_document_t *document;
     atomic_bool closing, refresh, import_tf, save;
+    atomic_bool setup_stop, setup_busy;
+    atomic_int setup_request;
     atomic_uint revision;
     bool loaded;
+    bool setup_wifi_qr, setup_saved;
     unsigned tab;
     void (*on_close)(void);
 } info_page_t;
 static info_page_t *s_info;
+static lv_obj_t *button(lv_obj_t *parent, const char *text, int x, int width, bool symbol, lv_event_cb_t cb, info_page_t *s);
+static void setup_show_details(info_page_t *s);
+static void setup_close_ui(info_page_t *s);
 
 static lv_obj_t *label(lv_obj_t *parent, const char *text, int width)
 {
@@ -100,8 +110,10 @@ static void load_config(info_config_t *out, bool use_nvs)
     }
     nvs_handle_t nvs;
     if (use_nvs && nvs_open("info_desk", NVS_READONLY, &nvs) == ESP_OK) {
-        info_config_t saved = {0}; size_t u = sizeof(saved.url), t = sizeof(saved.token);
-        if (nvs_get_str(nvs, "url", saved.url, &u) == ESP_OK && nvs_get_str(nvs, "token", saved.token, &t) == ESP_OK &&
+        info_config_t saved = {0}; size_t size = sizeof(saved), u = sizeof(saved.url), t = sizeof(saved.token);
+        bool found = nvs_get_blob(nvs, "profile", &saved, &size) == ESP_OK && size == sizeof(saved);
+        if (!found) found = nvs_get_str(nvs, "url", saved.url, &u) == ESP_OK && nvs_get_str(nvs, "token", saved.token, &t) == ESP_OK;
+        if (found && memchr(saved.url, 0, sizeof(saved.url)) && memchr(saved.token, 0, sizeof(saved.token)) &&
             info_url_valid(saved.url) && info_token_valid(saved.token)) *out = saved;
         nvs_close(nvs);
     }
@@ -112,8 +124,8 @@ static esp_err_t save_config(const info_config_t *config)
     nvs_handle_t nvs;
     esp_err_t ret = nvs_open("info_desk", NVS_READWRITE, &nvs);
     if (ret != ESP_OK) return ret;
-    ret = nvs_set_str(nvs, "url", config->url);
-    if (ret == ESP_OK) ret = nvs_set_str(nvs, "token", config->token);
+    // A single NVS value prevents a partial URL/token update after power loss.
+    ret = nvs_set_blob(nvs, "profile", config, sizeof(*config));
     if (ret == ESP_OK) ret = nvs_commit(nvs);
     nvs_close(nvs); return ret;
 }
@@ -186,6 +198,46 @@ static void worker(void *arg)
     lvgl_port_unlock();
     int64_t next = 0;
     while (!atomic_load(&s->closing)) {
+        int setup_request = atomic_exchange(&s->setup_request, 0);
+        if (setup_request && !s->setup) {
+            s->setup_saved = false;
+            esp_err_t ret = info_setup_start(setup_request == 2, s->config.url, *s->config.token != 0, &s->setup, &s->setup_details);
+            lvgl_port_lock(0);
+            if (s->setup_page && !atomic_load(&s->closing)) {
+                if (ret == ESP_OK) { s->setup_wifi_qr = s->setup_details.hotspot; setup_show_details(s); }
+                else if (s->setup_status) lv_label_set_text(s->setup_status, "启动失败，请先打开WLAN");
+            } else atomic_store(&s->setup_stop, true);
+            lvgl_port_unlock();
+            if (ret != ESP_OK) atomic_store(&s->setup_busy, false);
+        }
+        if (!s->setup && atomic_load(&s->setup_stop)) atomic_store(&s->setup_busy, false);
+        if (s->setup) {
+            info_setup_update_t update;
+            if (info_setup_take_update(s->setup, &update)) {
+                info_config_t pending = s->config;
+                strlcpy(pending.url, update.url, sizeof(pending.url));
+                if (update.action == INFO_TOKEN_REPLACE) strlcpy(pending.token, update.token, sizeof(pending.token));
+                if (update.action == INFO_TOKEN_CLEAR) memset(pending.token, 0, sizeof(pending.token));
+                esp_err_t ret = save_config(&pending);
+                info_setup_finish_update(s->setup, ret == ESP_OK, pending.url, *pending.token != 0);
+                lvgl_port_lock(0);
+                if (!atomic_load(&s->closing)) {
+                    if (ret == ESP_OK) {
+                        s->config = pending; s->setup_saved = true; free(s->document); s->document = NULL;
+                        editor_close(s); render(s); atomic_store(&s->refresh, true);
+                    }
+                    if (s->setup_status) lv_label_set_text(s->setup_status, ret == ESP_OK ? "已保存" : "保存失败");
+                }
+                lvgl_port_unlock(); memset(&update, 0, sizeof(update)); memset(&pending, 0, sizeof(pending));
+            }
+            if (atomic_load(&s->setup_stop) || info_setup_expired(s->setup)) {
+                info_setup_stop(s->setup); s->setup = NULL;
+                lvgl_port_lock(0); memset(&s->setup_details, 0, sizeof(s->setup_details)); setup_close_ui(s); lvgl_port_unlock();
+                atomic_store(&s->setup_busy, false);
+                set_status(s, s->setup_saved ? "配置已保存" : "网页设置已关闭");
+                atomic_store(&s->refresh, true);
+            }
+        }
         if (atomic_exchange(&s->import_tf, false)) {
             info_config_t imported; load_config(&imported, false);
             lvgl_port_lock(0);
@@ -208,7 +260,7 @@ static void worker(void *arg)
             }
             lvgl_port_unlock();
         }
-        if (atomic_exchange(&s->refresh, false) || esp_timer_get_time() >= next) {
+        if (!s->setup && (atomic_exchange(&s->refresh, false) || esp_timer_get_time() >= next)) {
             unsigned revision = atomic_load(&s->revision);
             set_status(s, "正在更新...");
             info_document_t *doc = heap_caps_calloc(1, sizeof(*doc), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
@@ -223,7 +275,9 @@ static void worker(void *arg)
         }
         vTaskDelay(pdMS_TO_TICKS(30));
     }
+    if (s->setup) info_setup_stop(s->setup);
     lvgl_port_lock(0);
+    memset(&s->setup_details, 0, sizeof(s->setup_details));
     if (s->page) lv_obj_del(s->page);
     s_info = NULL;
     if (s->on_close) s->on_close();
@@ -237,6 +291,7 @@ static void delete_cb(lv_event_t *e)
 {
     info_page_t *s = lv_event_get_user_data(e); atomic_store(&s->closing, true);
     s->page = s->list = s->status = s->gear = s->editor = s->address = s->token = s->keyboard = s->edit_status = NULL;
+    s->setup_page = s->setup_content = s->setup_toggle = s->setup_status = NULL;
 }
 static void close_cb(lv_event_t *e) { info_page_t *s = lv_event_get_user_data(e); atomic_store(&s->closing, true); lv_label_set_text(s->status, "关闭中..."); }
 static void refresh_cb(lv_event_t *e) { info_page_t *s = lv_event_get_user_data(e); if (s->loaded) atomic_store(&s->refresh, true); }
@@ -263,14 +318,95 @@ static lv_obj_t *button(lv_obj_t *parent, const char *text, int x, int width, bo
     lv_label_set_text(t, text); lv_obj_center(t); return btn;
 }
 
+static void setup_close_ui(info_page_t *s)
+{
+    lv_obj_t *page = s->setup_page;
+    s->setup_page = s->setup_content = s->setup_toggle = s->setup_status = NULL;
+    if (page) lv_obj_del(page);
+}
+
+static void setup_back(lv_event_t *e)
+{
+    info_page_t *s = lv_event_get_user_data(e);
+    atomic_store(&s->setup_stop, true); atomic_store(&s->setup_request, 0); setup_close_ui(s);
+}
+
+static void setup_show_details(info_page_t *s)
+{
+    if (!s->setup_content) return;
+    lv_obj_clean(s->setup_content); s->setup_status = NULL;
+    info_setup_details_t *d = &s->setup_details;
+    lv_obj_t *frame = lv_obj_create(s->setup_content);
+    lv_obj_set_pos(frame, 0, 0); lv_obj_set_size(frame, 160, 160);
+    lv_obj_set_style_pad_all(frame, 0, 0); lv_obj_set_style_border_width(frame, 0, 0);
+    lv_obj_set_style_radius(frame, 0, 0); lv_obj_set_style_bg_color(frame, lv_color_white(), 0);
+    lv_obj_clear_flag(frame, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_t *qr = lv_qrcode_create(frame, 128, lv_color_black(), lv_color_white());
+    lv_obj_center(qr);
+    char payload[160];
+    if (s->setup_wifi_qr) snprintf(payload, sizeof(payload), "WIFI:T:WPA;S:%s;P:%s;;", d->ssid, d->password);
+    else strlcpy(payload, d->url, sizeof(payload));
+    lv_qrcode_update(qr, payload, strlen(payload)); memset(payload, 0, sizeof(payload));
+    lv_obj_t *heading = label(s->setup_content, "配对码", 144); lv_obj_set_pos(heading, 170, 0);
+    lv_obj_t *pin = label(s->setup_content, d->pin, 144); lv_obj_set_pos(pin, 170, 25);
+    lv_obj_set_style_text_font(pin, &lv_font_montserrat_24, 0);
+    char credentials[96];
+    snprintf(credentials, sizeof(credentials), d->hotspot ? "%s\n%s" : "WLAN\n5 min", d->ssid, d->password);
+    lv_obj_t *access = label(s->setup_content, credentials, 144); lv_obj_set_pos(access, 170, 63);
+    lv_obj_set_style_text_font(access, &lv_font_montserrat_14, 0);
+    memset(credentials, 0, sizeof(credentials));
+    s->setup_status = label(s->setup_content, s->setup_saved ? "已保存" : "等待配对", 144); lv_obj_set_pos(s->setup_status, 170, 116);
+    lv_obj_t *url = label(s->setup_content, d->url, 312); lv_obj_set_pos(url, 2, 170);
+    lv_obj_set_style_text_font(url, &lv_font_montserrat_14, 0);
+    if (d->hotspot) {
+        lv_obj_clear_flag(s->setup_toggle, LV_OBJ_FLAG_HIDDEN);
+        lv_label_set_text(lv_obj_get_child(s->setup_toggle, 0), s->setup_wifi_qr ? "网页" : "热点");
+    }
+}
+
+static void setup_toggle(lv_event_t *e)
+{
+    info_page_t *s = lv_event_get_user_data(e); s->setup_wifi_qr = !s->setup_wifi_qr; setup_show_details(s);
+}
+
+static void setup_choose(lv_event_t *e)
+{
+    info_page_t *s = lv_event_get_user_data(e);
+    if (atomic_exchange(&s->setup_busy, true)) return;
+    lv_obj_t *target = lv_event_get_target(e);
+    bool hotspot = (uintptr_t)lv_obj_get_user_data(target) == 2;
+    atomic_store(&s->setup_stop, false); atomic_store(&s->setup_request, hotspot ? 2 : 1);
+    lv_obj_add_state(target, LV_STATE_DISABLED);
+    lv_label_set_text(s->setup_status, "启动中...");
+}
+
+static void setup_open(lv_event_t *e)
+{
+    info_page_t *s = lv_event_get_user_data(e);
+    if (s->setup_page || atomic_load(&s->closing)) return;
+    if (atomic_load(&s->save)) return;
+    if (atomic_load(&s->setup_busy)) { if (s->edit_status) lv_label_set_text(s->edit_status, "关闭中"); return; }
+    s->setup_page = band(s->page, 0, 240);
+    button(s->setup_page, LV_SYMBOL_LEFT, 2, 38, true, setup_back, s);
+    lv_obj_t *title = label(s->setup_page, "网页配置", 150); lv_obj_set_pos(title, 48, 8);
+    s->setup_toggle = button(s->setup_page, "网页", 240, 76, false, setup_toggle, s);
+    lv_obj_add_flag(s->setup_toggle, LV_OBJ_FLAG_HIDDEN);
+    s->setup_content = band(s->setup_page, 42, 198);
+    lv_obj_t *wlan = button(s->setup_content, "同一WLAN", 8, 144, false, setup_choose, s);
+    lv_obj_t *ap = button(s->setup_content, "临时热点", 168, 144, false, setup_choose, s);
+    lv_obj_set_user_data(wlan, (void *)(uintptr_t)1); lv_obj_set_user_data(ap, (void *)(uintptr_t)2);
+    s->setup_status = label(s->setup_content, "选择连接方式", 304); lv_obj_set_pos(s->setup_status, 8, 60);
+}
+
 static void settings_cb(lv_event_t *e)
 {
     info_page_t *s = lv_event_get_user_data(e);
     if (!s->loaded || s->editor || atomic_load(&s->closing)) return;
     s->editor = band(s->page, 0, 240);
     button(s->editor, LV_SYMBOL_LEFT, 2, 38, true, edit_back, s);
-    s->edit_status = label(s->editor, "服务配置", 120); lv_obj_set_pos(s->edit_status, 46, 8);
-    button(s->editor, "TF", 180, 50, true, edit_import, s); button(s->editor, "保存", 240, 76, false, edit_save, s);
+    s->edit_status = label(s->editor, "配置", 66); lv_obj_set_pos(s->edit_status, 46, 8);
+    button(s->editor, LV_SYMBOL_WIFI, 116, 44, true, setup_open, s);
+    button(s->editor, "TF", 168, 50, true, edit_import, s); button(s->editor, "保存", 228, 88, false, edit_save, s);
     s->address = lv_textarea_create(s->editor); s->token = lv_textarea_create(s->editor);
     lv_obj_t *fields[] = { s->address, s->token };
     for (int i = 0; i < 2; i++) {
@@ -297,6 +433,7 @@ esp_err_t information_open(void (*on_close)(void))
     if (!s) return ESP_ERR_NO_MEM;
     atomic_init(&s->closing, false); atomic_init(&s->refresh, true); atomic_init(&s->import_tf, false);
     atomic_init(&s->save, false); atomic_init(&s->revision, 1); s->on_close = on_close;
+    atomic_init(&s->setup_stop, false); atomic_init(&s->setup_busy, false); atomic_init(&s->setup_request, 0);
     s->page = band(lv_scr_act(), 0, 240); lv_obj_add_event_cb(s->page, delete_cb, LV_EVENT_DELETE, s);
     button(s->page, LV_SYMBOL_LEFT, 2, 38, true, close_cb, s);
     lv_obj_t *title = label(s->page, "信息台", 150); lv_obj_set_pos(title, 48, 8);

@@ -1,4 +1,5 @@
 #include "information_payload.h"
+#include "information_setup_protocol.h"
 #include <assert.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -6,6 +7,28 @@
 
 int main(int argc, char **argv)
 {
+    char pin[INFO_SETUP_PIN_SIZE]; info_setup_update_t update;
+    const char *pair = "{\"pin\":\"123456\"}";
+    assert(info_setup_parse_pin(pair, strlen(pair), pin)); assert(!strcmp(pin, "123456"));
+    const char *bad_pair[] = { "{\"pin\":\"12345\"}", "{\"pin\":\"12345x\"}", "{\"pin\":123456}",
+        "{\"pin\":\"123456\",\"pin\":\"654321\"}", "{\"pin\":\"123456\\u0000\"}", "{\"pin\":{\"pin\":\"123456\"}}" };
+    for (size_t i = 0; i < sizeof(bad_pair)/sizeof(bad_pair[0]); i++) assert(!info_setup_parse_pin(bad_pair[i], strlen(bad_pair[i]), pin));
+    const char *save = "{\"url\":\"https://example.com/info\",\"token\":\"new-token\",\"action\":\"replace\"}";
+    assert(info_setup_parse_update(save, strlen(save), &update)); assert(update.action == INFO_TOKEN_REPLACE);
+    const char *clear = "{\"url\":\"\",\"token\":\"\",\"action\":\"clear\"}";
+    assert(info_setup_parse_update(clear, strlen(clear), &update)); assert(update.action == INFO_TOKEN_CLEAR);
+    const char *bad_save[] = { "{\"url\":\"\",\"token\":\"\",\"action\":\"keep\"}",
+        "{\"url\":\"http://example.com/info\",\"token\":\"abc\",\"action\":\"replace\"}",
+        "{\"url\":\"https://example.com/info\",\"token\":\"\",\"action\":\"replace\"}",
+        "{\"url\":\"https://example.com/info\",\"token\":\"abc\",\"action\":\"clear\"}",
+        "{\"url\":\"https://example.com/info\",\"url\":\"https://evil.test/\",\"action\":\"keep\"}" };
+    for (size_t i = 0; i < sizeof(bad_save)/sizeof(bad_save[0]); i++) assert(!info_setup_parse_update(bad_save[i], strlen(bad_save[i]), &update));
+    assert(info_setup_secret_equal("secret", "secret")); assert(!info_setup_secret_equal("secret", "wrong"));
+    assert(!info_setup_secret_equal("", ""));
+    assert(info_setup_origin_valid("172.30.42.1:8080", "http://172.30.42.1:8080", "172.30.42.1:8080"));
+    assert(info_setup_origin_valid("172.30.42.1:8080", NULL, "172.30.42.1:8080"));
+    assert(!info_setup_origin_valid("evil.test:8080", NULL, "172.30.42.1:8080"));
+    assert(!info_setup_origin_valid("172.30.42.1:8080", "https://evil.test", "172.30.42.1:8080"));
     assert(info_url_valid("https://example.com/info"));
     assert(info_url_valid(""));
     assert(!info_url_valid("http://example.com/info"));

@@ -7,8 +7,50 @@ The device consumes a compact authenticated JSON response, not raw XML or HTML.
 
 ## Device Configuration
 
-After AWS deployment, copy the private generated
-`backend/serverless-media/.deploy/info.ini` to `/szpi/config/info.ini` on TF.
+### Local Web Setup
+
+Open `信息台` > gear > Wi-Fi symbol. Choose `同一WLAN` to use the device's
+current WLAN address, or `临时热点` to temporarily enable AP+STA mode. The
+device displays the page URL and a six-digit pairing code. Hotspot mode also
+displays a random WPA2 password and a Wi-Fi QR; the top-right button toggles
+between joining the hotspot and opening the web-page QR. No cloud registration
+is needed and no extra cloud resources are created.
+
+The browser can edit the service URL/token directly or select the existing
+private `.deploy/info.ini` using `导入 INI`. This reads the file in the browser;
+it does not require inserting a TF card. Saving writes the configuration to
+device NVS, then closes setup after five seconds and refreshes the information
+desk. Leaving the token empty retains it; replacement and clearing are explicit.
+Stored tokens are never read back through the web API. The portal configures
+this information service only, not WLAN credentials or backend feed/location
+preferences. Those remain separate settings.
+
+All web assets are embedded, so the temporary hotspot does not need Internet
+access. AP+STA keeps the station interface enabled; both interfaces share one
+radio/channel, with the external AP's channel taking priority. There is **no
+NAT or Internet sharing**. The information fetch worker pauses during setup to
+limit memory usage. Returning from setup restores STA mode without intentionally
+disconnecting the existing station. On first use without saved WLAN, open the
+WLAN application once to initialize its driver before starting a setup hotspot.
+
+The portal uses local HTTP on port 8080, not browser-trusted HTTPS. Use the
+same-WLAN mode only on a trusted LAN; it does not protect against active LAN
+interception. Prefer the temporary WPA2 hotspot on shared networks. Its server
+accepts connections only on the selected interface/address, validates Host and
+Origin, has no CORS, issues an in-memory 128-bit session after pairing, bounds
+request sizes, and closes after five minutes or eight incorrect pairing attempts.
+The password/PIN are displayed locally but not logged. Closing the page cancels
+setup. The hotspot is not configured to persist across boots. Never expose this
+HTTP service through port forwarding.
+
+URL and token are now saved as one NVS blob. Existing separate URL/token keys
+are read as a migration fallback; after saving with this firmware, older firmware
+does not read that newer blob and may show its older settings.
+
+### TF Import (Optional)
+
+For offline import, the private generated
+`backend/serverless-media/.deploy/info.ini` belongs at `/szpi/config/info.ini` on TF.
 Open the information desk; on first use the TF file is loaded automatically.
 The settings gear has an HTTPS URL, a masked read token, TF import and Save.
 Saved NVS settings take precedence over TF; use TF import then Save to replace
@@ -96,3 +138,14 @@ Set `CJSON_SOURCE_DIR` at configure time if ESP-IDF's cJSON is elsewhere.
 Hardware checks: import/save/reopen configuration; switch all three tabs;
 scroll RSS; refresh while connected/disconnected; return during a request and
 reopen quickly. Check no reboot, old-page update, leaked token or overlap.
+
+Local setup checks also cover Host/Origin rejection, missing/incorrect session
+tokens, duplicate/malformed JSON fields, explicit token keep/replace/clear,
+and wrong PIN input. `tools/setup-preview.mjs` serves an offline browser fixture
+on a random loopback port with synthetic PIN `123456`; it never accesses the
+device, cloud or real configuration. Browser checks on 2026-10-15 covered wrong
+PIN, pairing, INI selection/import and save confirmation at 360x740 and
+1280x800. This fixture does not prove actual hotspot radio behavior or NVS writes.
+Real-device acceptance must additionally check AP+STA join, persistent settings
+after reboot, auto-close/expiry, returning while setup starts, and recovery of
+internal memory after repeated open/close cycles.
