@@ -160,7 +160,18 @@ static const char *fetch_info(info_page_t *s, info_document_t *result, unsigned 
     }
     esp_http_client_set_header(client, "Accept", "application/json");
     if (esp_http_client_open(client, 0) != ESP_OK) goto done;
-    int64_t length = esp_http_client_fetch_headers(client);
+    // A cold serverless request can exceed one socket poll; keep the same request
+    // alive while checking cancellation between documented EAGAIN returns.
+    int64_t header_deadline = esp_timer_get_time() + 12000000;
+    int64_t length;
+    do {
+        if (atomic_load(&s->closing) || revision != atomic_load(&s->revision)) goto done;
+        int64_t remaining = header_deadline - esp_timer_get_time();
+        if (remaining <= 0) { error = "等待服务响应超时"; goto done; }
+        esp_http_client_set_timeout_ms(client, remaining < 2500000 ? (int)((remaining + 999) / 1000) : 2500);
+        length = esp_http_client_fetch_headers(client);
+    } while (length == -ESP_ERR_HTTP_EAGAIN);
+    esp_http_client_set_timeout_ms(client, 2500);
     int code = esp_http_client_get_status_code(client);
     if (code != 200) { error = code == 401 || code == 403 ? "只读令牌无效" : "服务响应异常"; goto done; }
     if (length < 0 || length > INFO_BODY_LIMIT || strncasecmp(context.mime, "application/json", 16)) {
@@ -169,13 +180,16 @@ static const char *fetch_info(info_page_t *s, info_document_t *result, unsigned 
     size_t used = 0; int64_t deadline = esp_timer_get_time() + 12000000;
     while (!esp_http_client_is_complete_data_received(client)) {
         if (atomic_load(&s->closing) || revision != atomic_load(&s->revision)) goto done;
-        if (used == INFO_BODY_LIMIT || esp_timer_get_time() > deadline) { error = "响应过大或超时"; goto done; }
-        int read = esp_http_client_read(client, body + used, INFO_BODY_LIMIT - used);
+        if (esp_timer_get_time() > deadline) { error = "响应过大或超时"; goto done; }
+        int read = esp_http_client_read(client, body + used, INFO_BODY_LIMIT + 1 - used);
+        if (read == -ESP_ERR_HTTP_EAGAIN) continue;
         if (read < 0 || (read == 0 && !esp_http_client_is_complete_data_received(client))) goto done;
         used += read;
+        if (used > INFO_BODY_LIMIT) { error = "响应过大"; goto done; }
     }
     body[used] = 0;
     error = info_document_parse(body, used, result) ? NULL : "信息格式不支持";
+    ESP_LOGI("information", "response status=%d bytes=%u parsed=%d", code, (unsigned)used, error == NULL);
 done:
     if (client) esp_http_client_cleanup(client);
     free(body); return error;
@@ -374,6 +388,7 @@ static void setup_choose(lv_event_t *e)
 {
     info_page_t *s = lv_event_get_user_data(e);
     if (atomic_exchange(&s->setup_busy, true)) return;
+    atomic_fetch_add(&s->revision, 1);
     lv_obj_t *target = lv_event_get_target(e);
     bool hotspot = (uintptr_t)lv_obj_get_user_data(target) == 2;
     atomic_store(&s->setup_stop, false); atomic_store(&s->setup_request, hotspot ? 2 : 1);

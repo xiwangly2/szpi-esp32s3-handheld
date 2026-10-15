@@ -152,3 +152,15 @@ PIN, pairing, INI selection/import and save confirmation at 360x740 and
 Real-device acceptance must additionally check AP+STA join, persistent settings
 after reboot, auto-close/expiry, returning while setup starts, and recovery of
 internal memory after repeated open/close cycles.
+
+The `a4ec80d` device check confirmed unauthorized and cross-origin requests were
+rejected (403), pairing succeeded, configuration submission returned 202, NVS
+save was confirmed, and the setup port closed automatically. No token was
+returned by the status endpoint. An earlier socket check rejected IPv4-mapped
+connections on IDF's IPv6 listener; the corrected check still restricts traffic
+to the selected IPv4 interface rather than opening every interface.
+
+The first post-setup cloud request exposed a cold-start timeout. The reader now
+retries the documented HTTP EAGAIN result on the same connection, with a
+12-second header deadline and cancellation checks between socket polls. This
+does not start repeated Lambda requests or disable certificate verification.
